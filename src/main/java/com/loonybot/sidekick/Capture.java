@@ -11,7 +11,7 @@ import android.os.StatFs;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-import com.google.blocks.ftcrobotcontroller.runtime.BlocksOpMode;
+//import com.google.blocks.ftcrobotcontroller.runtime.BlocksOpMode;
 import com.qualcomm.ftccommon.FtcEventLoopHandler;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver;
 import com.qualcomm.hardware.limelightvision.LLResult;
@@ -68,7 +68,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryImpl;
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryInternal;
 import org.firstinspires.ftc.robotcore.internal.system.AppUtil;
-import org.firstinspires.inspection.InspectionState;
+//import org.firstinspires.inspection.InspectionState;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -1864,7 +1864,7 @@ class Capture {
         manifest.gamepadIsPs4 = gamepadIsPs4;
         manifest.suppressedIssues = sidekick.suppressedIssues.stream().mapToInt(Integer::intValue).toArray();
         manifest.appBuildTime = sidekick.appBuildTime;
-        manifest.isBlocksOpMode = opMode instanceof BlocksOpMode;
+        manifest.isBlocksOpMode = false; // @@@ opMode instanceof BlocksOpMode;
         manifest.availableProcessors = Runtime.getRuntime().availableProcessors();
 
         Class<? extends OpMode> klass = opMode.getClass();
@@ -1898,9 +1898,11 @@ class Capture {
 
     /// Serialize privacy-sensitive data.
     void serializePii() {
-        InspectionState inspection = new InspectionState();
-        inspection.initializeLocal();
-        pii.robotName = inspection.deviceName;
+        pii.robotName = ""; // @@@
+
+//        InspectionState inspection = new InspectionState();
+//        inspection.initializeLocal();
+//        pii.robotName = inspection.deviceName;
 
         byte[] data = Sidekick.gson.toJson(pii).getBytes(UTF8);
         if ((chunkRemaining -= 8) < 0)

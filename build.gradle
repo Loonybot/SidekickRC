@@ -4,40 +4,27 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:7.4.2'
+        classpath "com.android.tools.build:gradle:8.7.0"
     }
 }
 
-apply plugin: 'com.android.library'
-apply plugin: 'maven-publish'
+apply plugin: "com.android.library"
+apply plugin: "maven-publish"
 
 android {
-    compileSdkVersion 30
+    namespace "com.loonybot.sidekick"
 
-    // Updated namespace to match the package name of the source files.
-    // A mismatch here can cause NullPointerExceptions in internal AGP tasks.
-    namespace 'com.loonybot.sidekick'
+    compileSdkVersion 28
 
     defaultConfig {
         minSdkVersion 24
         //noinspection ExpiredTargetSdkVersion
-        targetSdkVersion 28
-
-        versionCode 1
-        versionName "1.0"
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        targetSdkVersion 26
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
-    }
-
-    publishing {
-        singleVariant('release') {
-            withSourcesJar()
-            withJavadocJar()
-        }
     }
 }
 
@@ -48,29 +35,25 @@ repositories {
 }
 
 dependencies {
-    implementation 'androidx.annotation:annotation:1.7.1'
-    implementation 'org.firstinspires.ftc:Inspection:11.1.0'
-    implementation 'org.firstinspires.ftc:Blocks:11.1.0'
-    implementation 'org.firstinspires.ftc:RobotCore:11.1.0'
-    implementation 'org.firstinspires.ftc:RobotServer:11.1.0'
-    implementation 'org.firstinspires.ftc:OnBotJava:11.1.0'
-    implementation 'org.firstinspires.ftc:Hardware:11.1.0'
-    implementation 'org.firstinspires.ftc:FtcCommon:11.1.0'
-    implementation 'org.firstinspires.ftc:Vision:11.1.0'
-    implementation 'net.bytebuddy:byte-buddy-android:1.15.10' // Dynamic wrapper injection
-    implementation 'org.objenesis:objenesis:3.2' // Instantiate class without invoking a constructor
+    implementation "androidx.annotation:annotation:1.1.0"
+
+    implementation "org.firstinspires.ftc:RobotCore:11.1.0"
+    implementation "org.firstinspires.ftc:Hardware:11.1.0"
+    implementation "org.firstinspires.ftc:FtcCommon:11.1.0"
+
+    implementation "net.bytebuddy:byte-buddy-android:1.15.10"
+    implementation "org.objenesis:objenesis:3.2"
     implementation("org.nanohttpd:nanohttpd-websocket:2.3.1") {
         exclude module: "nanohttpd"
     }
 }
 
-
 publishing {
     publications {
         release(MavenPublication) {
-            groupId = 'com.github.LoonyBot'
-            artifactId = 'Sidekick'
-            version = '0.0.1'
+            groupId = "com.github.LoonyBot"
+            artifactId = "Sidekick"
+            version = "0.0.1"
         }
     }
 }
