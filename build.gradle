@@ -35,10 +35,10 @@ repositories {
 }
 
 dependencies {
-    // 'compileOnly' because we don't have a hard version dependency and can inherit user's version:
-    compileOnly "org.firstinspires.ftc:RobotCore:11.1.0"
-    compileOnly "org.firstinspires.ftc:Hardware:11.1.0"
-    compileOnly "org.firstinspires.ftc:FtcCommon:11.1.0"
+    // Sidekick returns wrapped FTC objects so these technically should be declared as "api":
+    api "org.firstinspires.ftc:RobotCore:11.0.0"
+    api "org.firstinspires.ftc:Hardware:11.0.0"
+    api "org.firstinspires.ftc:FtcCommon:11.0.0"
 
     implementation "androidx.annotation:annotation:1.1.0"
     implementation "net.bytebuddy:byte-buddy-android:1.15.10"
