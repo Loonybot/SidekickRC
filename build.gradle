@@ -14,18 +14,24 @@ apply plugin: 'maven-publish'
 android {
     compileSdkVersion 30
 
+    // Updated namespace to match the package name of the source files.
+    // A mismatch here can cause NullPointerExceptions in internal AGP tasks.
+    namespace 'com.loonybot.sidekick'
+
     defaultConfig {
         minSdkVersion 24
         //noinspection ExpiredTargetSdkVersion
         targetSdkVersion 28
+
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
-
-    namespace 'org.swerverobotics.ftc'
 
     publishing {
         singleVariant('release') {
@@ -51,21 +57,20 @@ dependencies {
     implementation 'org.firstinspires.ftc:Hardware:11.1.0'
     implementation 'org.firstinspires.ftc:FtcCommon:11.1.0'
     implementation 'org.firstinspires.ftc:Vision:11.1.0'
-    implementation 'net.bytebuddy:byte-buddy-android:1.15.10' // Android companion
+    implementation 'net.bytebuddy:byte-buddy-android:1.15.10' // Dynamic wrapper injection
     implementation 'org.objenesis:objenesis:3.2' // Instantiate class without invoking a constructor
+    implementation("org.nanohttpd:nanohttpd-websocket:2.3.1") {
+        exclude module: "nanohttpd"
+    }
 }
 
 
 publishing {
     publications {
         release(MavenPublication) {
-            groupId = 'com.github.SwerveRobotics'
-            artifactId = 'UltrasonicDistanceSensor'
+            groupId = 'com.github.LoonyBot'
+            artifactId = 'Sidekick'
             version = '0.0.1'
-
-            afterEvaluate {
-                from components.release
-            }
         }
     }
 }
