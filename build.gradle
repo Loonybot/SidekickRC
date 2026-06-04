@@ -42,9 +42,19 @@ repositories {
 }
 
 dependencies {
+    implementation 'androidx.annotation:annotation:1.7.1'
+    implementation 'org.firstinspires.ftc:Inspection:11.1.0'
+    implementation 'org.firstinspires.ftc:Blocks:11.1.0'
     implementation 'org.firstinspires.ftc:RobotCore:11.1.0'
+    implementation 'org.firstinspires.ftc:RobotServer:11.1.0'
+    implementation 'org.firstinspires.ftc:OnBotJava:11.1.0'
     implementation 'org.firstinspires.ftc:Hardware:11.1.0'
+    implementation 'org.firstinspires.ftc:FtcCommon:11.1.0'
+    implementation 'org.firstinspires.ftc:Vision:11.1.0'
+    implementation 'net.bytebuddy:byte-buddy-android:1.15.10' // Android companion
+    implementation 'org.objenesis:objenesis:3.2' // Instantiate class without invoking a constructor
 }
+
 
 publishing {
     publications {
