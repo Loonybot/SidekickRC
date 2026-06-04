@@ -1,0 +1,61 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.4.2'
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'maven-publish'
+
+android {
+    compileSdkVersion 30
+
+    defaultConfig {
+        minSdkVersion 24
+        //noinspection ExpiredTargetSdkVersion
+        targetSdkVersion 28
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    namespace 'org.swerverobotics.ftc'
+
+    publishing {
+        singleVariant('release') {
+            withSourcesJar()
+            withJavadocJar()
+        }
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+    maven { url "https://jitpack.io" }
+}
+
+dependencies {
+    implementation 'org.firstinspires.ftc:RobotCore:11.1.0'
+    implementation 'org.firstinspires.ftc:Hardware:11.1.0'
+}
+
+publishing {
+    publications {
+        release(MavenPublication) {
+            groupId = 'com.github.SwerveRobotics'
+            artifactId = 'UltrasonicDistanceSensor'
+            version = '0.0.1'
+
+            afterEvaluate {
+                from components.release
+            }
+        }
+    }
+}
