@@ -35,12 +35,12 @@ repositories {
 }
 
 dependencies {
+    // 'compileOnly' because we don't have a hard version dependency and can inherit user's version:
+    compileOnly "org.firstinspires.ftc:RobotCore:11.1.0"
+    compileOnly "org.firstinspires.ftc:Hardware:11.1.0"
+    compileOnly "org.firstinspires.ftc:FtcCommon:11.1.0"
+
     implementation "androidx.annotation:annotation:1.1.0"
-
-    implementation "org.firstinspires.ftc:RobotCore:11.1.0"
-    implementation "org.firstinspires.ftc:Hardware:11.1.0"
-    implementation "org.firstinspires.ftc:FtcCommon:11.1.0"
-
     implementation "net.bytebuddy:byte-buddy-android:1.15.10"
     implementation "org.objenesis:objenesis:3.2"
     implementation("org.nanohttpd:nanohttpd-websocket:2.3.1") {
