@@ -97,17 +97,7 @@ class Paint {
             throw new IllegalArgumentException("Sidekick: Must be a com.acmerobotics.dashboard.canvas Canvas object.");
         }
 
-        List<Object> ops;
-        try {
-            Field field = canvas.getClass().getDeclaredField("ops");
-            field.setAccessible(true);
-            //noinspection unchecked
-            ops = (List<Object>) field.get(canvas);
-        } catch (Exception e) {
-            capture.error(MinorError.CANVAS, "Inaccessible Canvas ops.");
-            return; // ====>
-        }
-
+        List<?> ops = (List<?>) Sidekick.getField(canvas, "ops", List.class);
         if (ops == null) {
             capture.error(MinorError.CANVAS, "Unexpected null dashboard canvas op");
             return; // ====>

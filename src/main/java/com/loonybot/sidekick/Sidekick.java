@@ -176,6 +176,26 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         Log.i(TAG, safeFormat(format, args));
     }
 
+    /// Reflection helper to get a field value; works on fields of superclasses.
+    static <T> T getField(Object object, String fieldName, Class<T> type) {
+        if (object == null)
+            return null;
+        Class<?> currentClass = object.getClass();
+        while (currentClass != null) {
+            try {
+                Field f = currentClass.getDeclaredField(fieldName);
+                f.setAccessible(true);
+                Object value = f.get(object);
+                return type.cast(value);
+            } catch (NoSuchFieldException ignored) {
+                currentClass = currentClass.getSuperclass();
+            } catch (IllegalAccessException e) {
+                return null;
+            }
+        }
+        return null; // not found anywhere
+    }
+
     /// Register an object serializer.
     <T> void registerSerializer(@NonNull T sample, @NonNull String format, @NonNull Sk.Serializer<T> serializer) {
         synchronized(sidekickLock) {

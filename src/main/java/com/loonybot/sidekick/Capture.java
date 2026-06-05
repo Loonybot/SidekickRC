@@ -11,7 +11,7 @@ import android.os.StatFs;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
-//import com.google.blocks.ftcrobotcontroller.runtime.BlocksOpMode;
+import com.google.blocks.ftcrobotcontroller.runtime.BlocksOpMode;
 import com.qualcomm.ftccommon.FtcEventLoopHandler;
 import com.qualcomm.hardware.gobilda.GoBildaPinpointDriver;
 import com.qualcomm.hardware.limelightvision.LLResult;
@@ -68,7 +68,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryImpl;
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryInternal;
 import org.firstinspires.ftc.robotcore.internal.system.AppUtil;
-//import org.firstinspires.inspection.InspectionState;
+import org.firstinspires.inspection.InspectionState;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -432,7 +432,7 @@ class DeviceChild {
 }
 
 /// Principal class responsible for creating the capture.
-@SuppressWarnings({"unchecked", "rawtypes", "ReassignedVariable"}) // Can add "unused"
+@SuppressWarnings({"unchecked", "rawtypes", "ReassignedVariable", "ResultOfMethodCallIgnored"}) // Can add "unused"
 class Capture {
     /// Descriptor for device API records and varargs records like [Sk#note]. This is not a static
     /// class as it needs to refer to the Capture object for the likes of [Capture#putFloatObject]
@@ -573,7 +573,7 @@ class Capture {
             if (AnalogInput.class.isAssignableFrom(deviceClass)) {
                 AnalogInput analogInput = (AnalogInput) deviceObject;
                 AnalogInputController analogInputController
-                        = getField(analogInput, "controller", AnalogInputController.class);
+                        = Sidekick.getField(analogInput, "controller", AnalogInputController.class);
                 if (analogInputController != null) {
                     if (LynxAnalogInputController.class.isAssignableFrom(analogInputController.getClass())) {
                         lynxController = (LynxAnalogInputController) analogInputController;
@@ -582,7 +582,7 @@ class Capture {
             } else if (DigitalChannelImpl.class.isAssignableFrom(deviceClass)) {
                 DigitalChannelImpl digitalChannel = (DigitalChannelImpl) deviceObject;
                 DigitalChannelController digitalChannelController
-                        = getField(digitalChannel, "controller", DigitalChannelController.class);
+                        = Sidekick.getField(digitalChannel, "controller", DigitalChannelController.class);
                 if (digitalChannelController != null) {
                     if (LynxDigitalChannelController.class.isAssignableFrom(digitalChannelController.getClass())) {
                         lynxController = (LynxDigitalChannelController) digitalChannelController;
@@ -598,7 +598,7 @@ class Capture {
                 }
             }
 
-            LynxModule lynxModule = getField(lynxController, "module", LynxModule.class);
+            LynxModule lynxModule = Sidekick.getField(lynxController, "module", LynxModule.class);
             if (lynxModule == null) {
                 error(MinorError.BULK_READ_LYNX_MODULE);
                 return; // ====>
@@ -949,26 +949,6 @@ class Capture {
         }
     }
 
-    /// Reflection helper to get a field value; works on fields of superclasses.
-    static <T> T getField(Object object, String fieldName, Class<T> type) {
-        if (object == null)
-            return null;
-        Class<?> currentClass = object.getClass();
-        while (currentClass != null) {
-            try {
-                Field f = currentClass.getDeclaredField(fieldName);
-                f.setAccessible(true);
-                Object value = f.get(object);
-                return type.cast(value);
-            } catch (NoSuchFieldException ignored) {
-                currentClass = currentClass.getSuperclass();
-            } catch (IllegalAccessException e) {
-                return null;
-            }
-        }
-        return null; // not found anywhere
-    }
-
     /// Returns the [ParamType] serialization format for the given class.
     static byte getParamType(Class<?> klass) {
         String name = klass.getName();
@@ -1126,7 +1106,7 @@ class Capture {
         isStarted = true;
         startNanoTime = nanoTime();
         startUnixTime = System.currentTimeMillis();
-        Sidekick.logI("\u25B6 was pressed"); /// This message syncs [#startNanoTime] with Unix time
+        Sidekick.logI("▶ was pressed"); /// This message syncs [#startNanoTime] with Unix time
 
         // Video recording files have the same root name as the capture; only the extension differs:
         String videoRootName = Sidekick.SUBDIRECTORY + "/" + dateAndTime;
@@ -1864,7 +1844,7 @@ class Capture {
         manifest.gamepadIsPs4 = gamepadIsPs4;
         manifest.suppressedIssues = sidekick.suppressedIssues.stream().mapToInt(Integer::intValue).toArray();
         manifest.appBuildTime = sidekick.appBuildTime;
-        manifest.isBlocksOpMode = false; // @@@ opMode instanceof BlocksOpMode;
+        manifest.isBlocksOpMode = opMode instanceof BlocksOpMode;
         manifest.availableProcessors = Runtime.getRuntime().availableProcessors();
 
         Class<? extends OpMode> klass = opMode.getClass();
@@ -1898,11 +1878,9 @@ class Capture {
 
     /// Serialize privacy-sensitive data.
     void serializePii() {
-        pii.robotName = ""; // @@@
-
-//        InspectionState inspection = new InspectionState();
-//        inspection.initializeLocal();
-//        pii.robotName = inspection.deviceName;
+        InspectionState inspection = new InspectionState();
+        inspection.initializeLocal();
+        pii.robotName = inspection.deviceName;
 
         byte[] data = Sidekick.gson.toJson(pii).getBytes(UTF8);
         if ((chunkRemaining -= 8) < 0)
@@ -1932,7 +1910,7 @@ class Capture {
         // 'lynxModuleMap' does not have to be complete in the event of failure:
         manifest.lynxAddresses = new int[lynxModuleList.size()];
         for (LynxModule module: lynxModuleList) {
-            Object bulkCachingLock = getField(module, "bulkCachingLock", Object.class);
+            Object bulkCachingLock = Sidekick.getField(module, "bulkCachingLock", Object.class);
             if ((bulkCachingLock != null) && (lynxModuleMap.size() < MAX_LYNX_COUNT)) {
                 LynxModuleInfo lynxInfo = new LynxModuleInfo(bulkCachingLock);
                 lynxInfo.module = module;
@@ -2055,7 +2033,7 @@ class Capture {
             Socket.broadcastStopScreenRecord();
 
             // If the opMode terminated because of an unhandled exception, record it:
-            RuntimeException exception = getField(opMode,"exception", RuntimeException.class);
+            RuntimeException exception = Sidekick.getField(opMode,"exception", RuntimeException.class);
             if (exception != null) {
                 if (beginRecord(RecordId.UNHANDLED_EXCEPTION, 0)) {
                     StringWriter writer = new StringWriter();
@@ -3003,7 +2981,7 @@ class Capture {
 
                 // If this is the first Limelight seen, stash its IP address for video capture at Start:
                 if ((deviceInfo.isLimelight) && (capture.limelightAddress == null)) {
-                    InetAddress inetAddress = getField(originalObject, "inetAddress", InetAddress.class);
+                    InetAddress inetAddress = Sidekick.getField(originalObject, "inetAddress", InetAddress.class);
                     if (inetAddress != null) {
                         capture.limelightAddress = inetAddress.getHostAddress();
                     } else {
