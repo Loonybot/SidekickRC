@@ -1,18 +1,28 @@
-name: Build and Release Sidekick Library
+name: Build and Release Sidekick Library (Android)
 
 on:
   push:
     tags:
       - "lib-v*"
 
+permissions:
+  contents: write   # REQUIRED for tag-triggered releases
+
 jobs:
-  build-library:
+  build-android-library:
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------
+      # Checkout repository
+      # ------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ------------------------------
+      # Extract version from tag
+      # Tag format: lib-v1.2.3
+      # ------------------------------
       - name: Extract version
         shell: bash
         run: |
@@ -20,19 +30,43 @@ jobs:
           VERSION="${RAW_TAG#lib-v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
+      # ------------------------------
+      # Install JDK 17 (FTC-compatible)
+      # ------------------------------
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
+      # ------------------------------
+      # Install Android SDK + build-tools
+      # ------------------------------
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform + build-tools
+        run: |
+          sdkmanager "platform-tools" \
+                     "platforms;android-30" \
+                     "build-tools;30.0.3"
+
+      # ------------------------------
+      # Make Gradle wrapper executable
+      # ------------------------------
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      # ------------------------------
+      # Build Android library (AAR)
+      # ------------------------------
       - name: Build library
-        run: ./gradlew clean build
+        run: ./gradlew clean assembleRelease
 
-      - name: Upload JAR to GitHub Release
+      # ------------------------------
+      # Upload AAR to GitHub Release
+      # ------------------------------
+      - name: Upload AAR to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -40,15 +74,19 @@ jobs:
           body: |
             **Sidekick Library ${{ env.VERSION }}**
 
-            This release contains the Java library used by FTC teams.
+            This release contains the Android library used by FTC teams.
             Add it to your Gradle project using:
 
             ```
             implementation 'com.github.Loonybot:Sidekick:lib-v${{ env.VERSION }}'
             ```
-          files: build/libs/*.jar
+          files: |
+            **/build/outputs/aar/*release.aar
 
-      - name: Trigger JitPack build (optional but recommended)
+      # ------------------------------
+      # Trigger JitPack prebuild
+      # ------------------------------
+      - name: Trigger JitPack build
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           echo "Triggering JitPack build for ${TAG}"
