@@ -1,0 +1,52 @@
+name: Build and Release Sidekick Library
+
+on:
+  push:
+    tags:
+      - "lib-v*"
+
+jobs:
+  build-library:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        shell: bash
+        run: |
+          RAW_TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${RAW_TAG#lib-v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Build library
+        run: ./gradlew clean build
+
+      - name: Upload JAR to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Sidekick Library ${{ env.VERSION }}"
+          body: |
+            **Sidekick Library ${{ env.VERSION }}**
+
+            This release contains the Java library used by FTC teams.
+            Add it to your Gradle project using:
+
+            ```
+            implementation 'com.github.Loonybot:Sidekick:lib-v${{ env.VERSION }}'
+            ```
+          files: build/libs/*.jar
+
+      - name: Trigger JitPack build (optional but recommended)
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Triggering JitPack build for ${TAG}"
+          curl -s "https://jitpack.io/com/github/Loonybot/Sidekick/${TAG}/build.log" || true
