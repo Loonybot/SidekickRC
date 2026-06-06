@@ -56,10 +56,6 @@ publishing {
             groupId = "com.github.Loonybot"
             artifactId = "Sidekick"
             version = "0.0.2"
-
-            afterEvaluate {
-                from components.release
-            }
         }
     }
 }
