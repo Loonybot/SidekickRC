@@ -14,12 +14,20 @@ apply plugin: "maven-publish"
 android {
     namespace "com.loonybot.sidekick"
 
+    buildFeatures {
+        buildConfig = true
+    }
+
+    def libVersion = System.getenv("VERSION") ?: "0.0.0"
+
     compileSdkVersion 28
 
     defaultConfig {
         minSdkVersion 24
         //noinspection ExpiredTargetSdkVersion
         targetSdkVersion 26
+
+        buildConfigField "String", "LIBRARY_VERSION", "\"${libVersion}\""
     }
 
     compileOptions {

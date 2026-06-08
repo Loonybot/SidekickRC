@@ -31,21 +31,6 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       # ------------------------------
-      # Generate Version.java
-      # ------------------------------
-      - name: Generate Version.java
-        run: |
-          mkdir -p src/main/java/com/loonybot/sidekick
-          cat > src/main/java/com/loonybot/sidekick/Version.java <<EOF
-          /// Generated version number. Don't edit.
-          package com.loonybot.sidekick;
-
-          public final class Version {
-              public static final String LIBRARY_VERSION = "${{ env.VERSION }}";
-          }
-          EOF
-
-      # ------------------------------
       # Install JDK 17 (FTC-compatible)
       # ------------------------------
       - name: Set up JDK
