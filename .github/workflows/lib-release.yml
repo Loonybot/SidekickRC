@@ -1,4 +1,4 @@
-name: Build and Release Sidekick Library (Android)
+name: Build and Release Sidekick RC lib (Android)
 
 on:
   push:
@@ -70,16 +70,17 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "Sidekick Library ${{ env.VERSION }}"
+          name: "Sidekick RC Library ${{ env.VERSION }}"
           body: |
-            **Sidekick Library ${{ env.VERSION }}**
+            **Sidekick RC Library ${{ env.VERSION }}**
 
-            This release contains the Android library used by FTC teams.
-            Add it to your Gradle project using:
+            Simply add this to your FTC robot's build.gradle using:
 
             ```
-            implementation 'com.github.Loonybot:Sidekick:lib-v${{ env.VERSION }}'
+            implementation 'com.github.Loonybot:SidekickRC:lib-v${{ env.VERSION }}'
             ```
+            
+            You can ignore the assets below.
           files: |
             **/build/outputs/aar/*release.aar
 
