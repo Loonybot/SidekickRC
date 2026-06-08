@@ -1,12 +1,12 @@
 # Sidekick RC
-Alpha release of Sidekick RC.
+Sidekick RC for FTC robotics. 
 
 ### Latest Versions
 
-| Component                | Version                                                                                              |
-|--------------------------|------------------------------------------------------------------------------------------------------|
-| **Sidekick Application** | ![Latest App Release](https://img.shields.io/github/v/release/Loonybot/SidekickRC?filter=app-v*)     |
-| **Sidekick Library**     | ![Latest Library Release](https://img.shields.io/github/v/release/Loonybot/SidekickRC?filter=lib-v*) |
+| Component       | Version                                                                                              |
+|-----------------|------------------------------------------------------------------------------------------------------|
+| **Application** | ![Latest App Release](https://img.shields.io/github/v/release/Loonybot/SidekickRC?filter=app-v*)     |
+| **Library**     | ![Latest Library Release](https://img.shields.io/github/v/release/Loonybot/SidekickRC?filter=lib-v*) |
 
 ### FTC Gradle Setup
 
