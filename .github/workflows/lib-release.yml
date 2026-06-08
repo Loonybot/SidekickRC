@@ -31,6 +31,21 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       # ------------------------------
+      # Generate Version.java
+      # ------------------------------
+      - name: Generate Version.java
+        run: |
+          mkdir -p src/main/java/com/loonybot/sidekick
+          cat > src/main/java/com/loonybot/sidekick/Version.java <<EOF
+          /// Generated version number. Don't edit.
+          package com.loonybot.sidekick;
+
+          public final class Version {
+              public static final String LIBRARY_VERSION = "${{ env.VERSION }}";
+          }
+          EOF
+
+      # ------------------------------
       # Install JDK 17 (FTC-compatible)
       # ------------------------------
       - name: Set up JDK
@@ -70,9 +85,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "Sidekick RC Library ${{ env.VERSION }}"
+          name: "Sidekick RC library v${{ env.VERSION }}"
           body: |
-            Add this to your FTC robot's build.gradle using:
+            Add this library to your FTC robot's build.gradle with the following command:
 
             ```
             implementation 'com.github.Loonybot:SidekickRC:lib-v${{ env.VERSION }}'
