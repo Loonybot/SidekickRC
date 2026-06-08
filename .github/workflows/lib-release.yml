@@ -1,4 +1,4 @@
-name: Build and Release Sidekick RC lib (Android)
+name: Build and Release the Sidekick RC library
 
 on:
   push:
@@ -72,15 +72,13 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: "Sidekick RC Library ${{ env.VERSION }}"
           body: |
-            **Sidekick RC Library ${{ env.VERSION }}**
-
-            Simply add this to your FTC robot's build.gradle using:
+            Add this to your FTC robot's build.gradle using:
 
             ```
             implementation 'com.github.Loonybot:SidekickRC:lib-v${{ env.VERSION }}'
             ```
             
-            You can ignore the assets below.
+            You can usually ignore the assets below.
           files: |
             **/build/outputs/aar/*release.aar
 
@@ -91,4 +89,4 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           echo "Triggering JitPack build for ${TAG}"
-          curl -s "https://jitpack.io/com/github/Loonybot/Sidekick/${TAG}/build.log" || true
+          curl -s "https://jitpack.io/com/github/Loonybot/SidekickRC/${TAG}/build.log" || true

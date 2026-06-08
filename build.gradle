@@ -54,8 +54,8 @@ publishing {
     publications {
         release(MavenPublication) {
             groupId = "com.github.Loonybot"
-            artifactId = "Sidekick"
-            version = "0.0.2"
+            artifactId = "SidekickRC"
+            version = "0.0.1"
         }
     }
 }
