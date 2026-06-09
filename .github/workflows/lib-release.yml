@@ -72,12 +72,23 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: "Sidekick RC library v${{ env.VERSION }}"
           body: |
-            Add this library to your FTC robot's build.gradle with the following command:
+            Add the following line to the **dependencies** section in your team code's **build.gradle**.
+            (That section should already have a line that says "project(':FtcRobotController')".)   
 
             ```
             implementation 'com.github.Loonybot:SidekickRC:lib-v${{ env.VERSION }}'
             ```
             
+            In that same file, if you don't already have JitPack in a **repositories** section, you'll need to add it:
+            
+            ```
+            repositories {
+                maven { url 'https://jitpack.io' }
+            }
+            ```
+            
+            Don't forget to sync your project with the updated Gradle file by pressing the Elephant icon in the top-right corner.  
+  
             You can usually ignore the assets below.
           files: |
             **/build/outputs/aar/*release.aar
