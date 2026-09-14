@@ -11,6 +11,39 @@ buildscript {
 apply plugin: "com.android.library"
 apply plugin: "maven-publish"
 
+// Generate a Version.java class containing the library version
+def libVersion = System.getenv("VERSION") ?: "0.0.0"
+tasks.register("generateVersionClass") {
+    def outputDir = layout.buildDirectory.dir("generated/source/version")
+
+    inputs.property("version", libVersion)
+    outputs.dir(outputDir)
+
+    doLast {
+        def pkg = "com.loonybot.sidekick"
+        def dir = outputDir.get().dir(pkg.replace('.', '/')).asFile
+        dir.mkdirs()
+
+        def file = new File(dir, "Version.java")
+        file.text = """
+            package ${pkg};
+
+            public final class Version {
+                public static final String LIBRARY_VERSION = "${libVersion}";
+            }
+        """.stripIndent()
+    }
+}
+android {
+    // Attach generated source directory to the main source set
+    sourceSets {
+        main.java.srcDir(layout.buildDirectory.dir("generated/source/version"))
+    }
+}
+tasks.withType(JavaCompile).configureEach {
+    dependsOn(tasks.named("generateVersionClass"))
+}
+
 android {
     namespace "com.loonybot.sidekick"
 
