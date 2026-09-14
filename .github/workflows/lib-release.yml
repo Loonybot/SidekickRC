@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "lib-v*"
+  workflow_dispatch: {}
 
 permissions:
   contents: write   # REQUIRED for tag-triggered releases
@@ -20,14 +21,18 @@ jobs:
         uses: actions/checkout@v4
 
       # ------------------------------
-      # Extract version from tag
+      # Extract version from tag (falls back to a placeholder for manual runs)
       # Tag format: lib-v1.2.3
       # ------------------------------
       - name: Extract version
         shell: bash
         run: |
-          RAW_TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${RAW_TAG#lib-v}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            RAW_TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${RAW_TAG#lib-v}"
+          else
+            VERSION="manual-${GITHUB_SHA::7}"
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       # ------------------------------
@@ -64,9 +69,10 @@ jobs:
         run: ./gradlew clean assembleRelease
 
       # ------------------------------
-      # Upload AAR to GitHub Release
+      # Upload AAR to GitHub Release (tag pushes only)
       # ------------------------------
       - name: Upload AAR to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -99,9 +105,10 @@ jobs:
             **/build/outputs/aar/*release.aar
 
       # ------------------------------
-      # Trigger JitPack prebuild
+      # Trigger JitPack prebuild (tag pushes only)
       # ------------------------------
       - name: Trigger JitPack build
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           echo "Triggering JitPack build for ${TAG}"
