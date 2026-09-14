@@ -1,6 +1,6 @@
 /// The common proxy interceptor code responsible for wrapping and recording every SDK call.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import static com.loonybot.sidekick.Capture.TICK_MASK;
@@ -90,6 +90,7 @@ public class Interceptor {
     }
 
     /// Every user call to a HardwareDevice or child method is intercepted by this routine.
+    @SuppressWarnings("unused") // ByteBuddy generates references to this method
     @RuntimeType public Object intercept(
             @Origin Method method,
             @AllArguments Object[] args,
@@ -126,7 +127,10 @@ public class Interceptor {
             }
             long recordId = descriptor.recordId + context.instanceId;
             long startTicks = (nanoStartTime >> TICK_SHIFT) & TICK_MASK;
-            long durationTicks = (nanoDuration >> TICK_SHIFT) & TICK_MASK;
+            long durationTicks = (nanoDuration >> TICK_SHIFT);
+            if (durationTicks >= TICK_MASK) {
+                durationTicks = TICK_MASK; // Saturate duration
+            }
             capture.chunk.putLong((recordId << 48) | (startTicks << 24) | (durationTicks));
             for (int i = 0; i < descriptor.paramPutters.length; i++) {
                 descriptor.paramPutters[i].accept(args[i]);

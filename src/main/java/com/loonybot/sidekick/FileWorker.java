@@ -1,6 +1,6 @@
 /// File writer worker thread logic.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import static com.loonybot.sidekick.Sidekick.SD_CARD_PATH;
@@ -35,7 +35,7 @@ import java.util.concurrent.TimeUnit;
 /// thread on file I/O. A message queue is employed for the primary thread to enqueue file
 /// requests. Android has nice thread message queue support which we don't use so that this
 /// code can be tested on the PC.
-@SuppressWarnings("NonAtomicOperationOnVolatileField")
+@SuppressWarnings({"ResultOfMethodCallIgnored", "NonAtomicOperationOnVolatileField"})
 class FileWorker {
     /// While actively writing the capture file, we use this extension:
     static final String WORKING_EXTENSION = ".temporary";
@@ -62,10 +62,9 @@ class FileWorker {
 
     /// Message to write the file's header record and close the capture file.
     static class CloseMessage extends Message {
-        int majorErrors;
-        int minorErrors;
         Section[] sections;
         Class<? extends OpMode> opModeClass;
+        boolean majorError;
         String dateAndTime;
         long startUnixTime;
         long startNanoTime;
@@ -73,11 +72,12 @@ class FileWorker {
         int lastRunNumber;
         CountDownLatch limelightDoneLatch;
         CountDownLatch fileDoneLatch;
-        public CloseMessage(int majorErrors, int minorErrors, Section[] sections, Class<? extends OpMode> opModeClass, String dateAndTime, long startUnixTime, long startNanoTime, long endNanoTime, int lastRunNumber, CountDownLatch limelightDoneLatch, CountDownLatch fileDoneLatch) {
-            this.majorErrors = majorErrors;
-            this.minorErrors = minorErrors;
+        public CloseMessage(Section[] sections, Class<? extends OpMode> opModeClass, boolean majorError,
+                            String dateAndTime, long startUnixTime, long startNanoTime, long endNanoTime,
+                            int lastRunNumber, CountDownLatch limelightDoneLatch, CountDownLatch fileDoneLatch) {
             this.sections = sections;
             this.opModeClass = opModeClass;
+            this.majorError = majorError;
             this.dateAndTime = dateAndTime;
             this.startUnixTime = startUnixTime;
             this.startNanoTime = startNanoTime;
@@ -99,7 +99,6 @@ class FileWorker {
     // set the bulk caching mode, and real-time counters may sample AnalogInput):
     static final Class<?>[] PRIME_CLASSES = { LynxModule.class, DcMotorEx.class, AnalogInput.class };
 
-    static int retentionDays = 7; // Default retention period, in days
     ProxyBuilder proxyBuilder; // Byte Buddy proxy builder
     LinkedBlockingQueue<Message> messageQueue = new LinkedBlockingQueue<>(); // Message queue
     ConcurrentLinkedQueue<ByteBuffer> freeBufferPool = new ConcurrentLinkedQueue<>(); // List of available buffers
@@ -207,11 +206,9 @@ class FileWorker {
 
     /// Write the capture's header, close the file, and rename it.
     private void close(CloseMessage message) throws IOException {
-        // Write the file header to the beginning of the file and then close the stream. First
-        // add ny file I/O errors to the message:
-        message.majorErrors |= (fileError) ? (1 << MajorError.FILE_WRITE_ERROR.ordinal()) : 0;
-        ByteBuffer headerBuffer = Header.create(message.majorErrors, message.minorErrors,
-            message.startUnixTime, message.sections);
+        // Write the file header to the beginning of the file and then close the stream.
+        ByteBuffer headerBuffer = Header.create(fileError || message.majorError,
+                message.startUnixTime, message.sections);
         do {
             channel.write(headerBuffer, 0);
         } while (headerBuffer.hasRemaining());
@@ -483,8 +480,7 @@ class FileWorker {
         // immediately following the capture header:
         int headerSize = Header.SIZE;
         sections[Section.LOGCAT] = new Section(headerSize, subsectionHeader.limit() + logcatFileLength);
-        ByteBuffer captureHeader = Header.create(
-                1 << MajorError.INTERRUPTED_CAPTURE.ordinal(), 0, 0, sections);
+        ByteBuffer captureHeader = Header.create(true, 0, sections);
 
         File captureFile = new File(Sidekick.SUBDIRECTORY, captureFileName);
         try {

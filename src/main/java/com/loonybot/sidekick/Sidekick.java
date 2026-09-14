@@ -1,6 +1,6 @@
 /// Sidekick state maintained across opModes and captures.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import android.content.Context;
@@ -157,6 +157,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     OpModeNotification expectedNotification = OpModeNotification.PRE_INIT; // The expected next OpMode notification
     HashMap<Thread, ThreadRegister> threadRegistry = new HashMap<>(); // Registered threads
     String captureName = ""; // Name specified by the user for the current capture; includes ".sidekick"
+    int retentionDays = 7; // Default retention period, in days
 
     final private NanoWSD server = new NanoWSD(WEB_SOCKET_PORT) {
         @Override protected WebSocket openWebSocket(IHTTPSession handshake) {
@@ -164,7 +165,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         }
     };
 
-    /// Output Logcat messages in a consistent way with varargs.
+    /// Output Logcat messages in a consistent and safe way with varargs.
     static String safeFormat(String format, Object... args) {
         try { return String.format(format, args); } catch (IllegalFormatException ignored) { return format; }
     }
@@ -178,17 +179,17 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         Log.i(TAG, safeFormat(format, args));
     }
 
-    /// Reflection helper to get a field value; works on fields of superclasses.
-    static <T> T getField(Object object, String fieldName, Class<T> type) {
-        if (object == null)
+    /// Reflection helper to get a field value; works on fields of superclasses. Null on failure.
+    static <T> T getInstanceField(Object instance, String fieldName, Class<T> fieldType) {
+        if (instance == null)
             return null;
-        Class<?> currentClass = object.getClass();
+        Class<?> currentClass = instance.getClass();
         while (currentClass != null) {
             try {
-                Field f = currentClass.getDeclaredField(fieldName);
-                f.setAccessible(true);
-                Object value = f.get(object);
-                return type.cast(value);
+                Field field = currentClass.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                Object value = field.get(instance);
+                return fieldType.cast(value);
             } catch (NoSuchFieldException ignored) {
                 currentClass = currentClass.getSuperclass();
             } catch (IllegalAccessException e) {
@@ -198,12 +199,36 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         return null; // not found anywhere
     }
 
+    /// Reflection helper to get a static field value from a named class. Returns defaultValue on failure.
+    @SuppressWarnings("SameParameterValue")
+    static <T> T getStaticField(String className, String fieldName, Class<T> fieldType, T defaultValue) {
+        try {
+            Class<?> klass = Class.forName(className);
+            Field field = klass.getDeclaredField(fieldName);
+            field.setAccessible(true);
+            Object value = field.get(null);
+            return fieldType.cast(value);
+        } catch (ClassNotFoundException | NoSuchFieldException | IllegalAccessException ignored) {
+            return defaultValue;
+        }
+    }
+
     /// Register an object serializer.
     <T> void registerSerializer(@NonNull T sample, @NonNull String format, @NonNull Sk.Serializer<T> serializer) {
         synchronized(sidekickLock) {
             Class<?> klass = sample.getClass();
             if (!serializersMap.containsKey(klass)) {
-                Object[] prototypeOutput = serializer.serialize(sample);
+                Object[] prototypeOutput;
+                // Call the user's serializer to generate a sample object that we'll use for type
+                // information. We may be calling from @OnCreate and really don't want to crash
+                // as that would cause an endless cycle of reboots:
+                try {
+                    prototypeOutput = serializer.serialize(sample);
+                } catch (Exception e) {
+                    logE("registerSerializer(): %s serializer crashed with exception: %s",
+                            klass.getName(), e.getMessage());
+                    return; // ===> Fail without registering the serializer
+                }
                 int identifier = serializersMap.size();
                 SerializerInfo<?> serializerInfo
                         = new SerializerInfo<>(klass, identifier, serializer, prototypeOutput, format);
@@ -217,11 +242,23 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     static boolean setApiRequestedState(ApiRequestedState state) {
         synchronized (sidekickLock) {
-            // The API can enable/disable Sidekick only if it hasn't initialized yet:
+            // The API can run only if it hasn't initialized yet:
             if (isInitialized) {
                 return false;
             }
             apiRequestedState = state;
+            return true;
+        }
+    }
+
+    /// API to set the retention period for automatic Sidekick capture data, in days.
+    boolean setRetentionDays(int days) {
+        synchronized (sidekickLock) {
+            // The API can run only if it hasn't initialized yet:
+            if (isInitialized) {
+                return false;
+            }
+            Sidekick.instance.retentionDays = days;
             return true;
         }
     }
@@ -233,11 +270,6 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
                 suppressedIssues.add(issueCode);
             }
         }
-    }
-
-    /// API to set the retention period for automatic Sidekick capture data, in days.
-    void setRetentionDays(int days) {
-        FileWorker.retentionDays = days;
     }
 
     /// Private API to set the capture's file name.
@@ -337,13 +369,10 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
             //    public static final String LIBRARY_PACKAGE_NAME = "com.qualcomm.ftcrobotcontroller"
             //    public static final String BUILD_TYPE = "debug"
             //    public static final String APP_BUILD_TIME = "2026-02-04T19:00:19.296-0800"
-            try {
-                Class<?> buildConfigClass = Class.forName("com.qualcomm.ftcrobotcontroller.BuildConfig");
-                Field appBuildTimeField = buildConfigClass.getDeclaredField("APP_BUILD_TIME");
-                instance.appBuildTime = (String) appBuildTimeField.get(null);
-            } catch (ClassNotFoundException | NoSuchFieldException | IllegalAccessException ignored) {}
-
+            //
             // If the app's build time has changed, reset the run number:
+            instance.appBuildTime = getStaticField("com.qualcomm.ftcrobotcontroller.BuildConfig",
+                    "APP_BUILD_TIME", String.class, "");
             if (!lastAppBuildTime.equals(instance.appBuildTime)) {
                 instance.lastRunNumber = 0;
             }
@@ -549,19 +578,16 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// because the user has pressed Stop.
     @Override public void onOpModePostStop(OpMode opMode) {
         assert(isEnabled);
-        logI("@@@ onOpModePostStop from thread %s", Thread.currentThread().getName());
-
         synchronized(sidekickLock) {
             // The system sometimes calls onOpModePostStop() multiple times; we only act on the
             // first call and ignore the others:
             if (expectedNotification == OpModeNotification.PRE_INIT) {
-                logE("@@@ onOpModePostStop() called when expecting %s", expectedNotification);
                 return; // ====>
             }
             expectedNotification = OpModeNotification.PRE_INIT; // Next expected notification
 
             if (!isDefaultOpMode) {
-                Capture.instance.endCapture();
+                Capture.instance.endCapture(Capture.LOGCAT_OP_MODE_STOP);
             }
         }
     }

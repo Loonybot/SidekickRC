@@ -1,6 +1,6 @@
 /// Common interface for all objects wrapped by the Sidekick proxy builder.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import android.graphics.Color;
@@ -32,7 +32,7 @@ class PaintId {
 }
 
 /// API object for rendering.
-/// @noinspection UnusedReturnValue
+@SuppressWarnings({"unused", "UnusedReturnValue"})
 class Paint {
     class CanvasOp {
         Object op; // Instance of a class that extends com.acmerobotics.dashboard.canvas.CanvasOp
@@ -50,7 +50,7 @@ class Paint {
                 index = fullName.lastIndexOf('.');
             }
             if ((index == -1) || (!fullName.startsWith("com.acmerobotics.dashboard.canvas."))) {
-                capture.error(MinorError.CANVAS, "Expected a dashboard type in the canvas, found " + fullName);
+                capture.minorError("Expected a dashboard type in the canvas, found %s", fullName);
                 return ""; // ====>
             }
             return fullName.substring(index + 1);
@@ -63,8 +63,7 @@ class Paint {
                 field.setAccessible(true);
                 return field.get(op);
             } catch (NoSuchFieldException|IllegalAccessException e) {
-                capture.error(MinorError.CANVAS, String.format("Can't access field '%s' in class '%s'",
-                        fieldName, opClass.getName()));
+                capture.minorError("Can't access field '%s' in class '%s'", fieldName, opClass.getName());
                 throw new IllegalAccessException(); // ====>
             }
         }
@@ -97,9 +96,9 @@ class Paint {
             throw new IllegalArgumentException("Sidekick: Must be a com.acmerobotics.dashboard.canvas Canvas object.");
         }
 
-        List<?> ops = (List<?>) Sidekick.getField(canvas, "ops", List.class);
+        List<?> ops = (List<?>) Sidekick.getInstanceField(canvas, "ops", List.class);
         if (ops == null) {
-            capture.error(MinorError.CANVAS, "Unexpected null dashboard canvas op");
+            capture.minorError("Unexpected null dashboard canvas op");
             return; // ====>
         }
 
@@ -109,7 +108,7 @@ class Paint {
 
         for (Object opObject: ops) {
             if (opObject == null) {
-                capture.error(MinorError.CANVAS, "Unexpected null dashboard canvas op");
+                capture.minorError("Unexpected null dashboard canvas op");
                 return; // ====>
             }
 
@@ -195,7 +194,7 @@ class Paint {
                         setOpacity((double) op.f("alpha"));
                         break;
                     default:
-                        capture.error(MinorError.CANVAS, "Unexpected dashboard canvas command '%s'", name);
+                        capture.minorError("Unexpected dashboard canvas command '%s'", name);
                         return; // ====>
                 }
                 assert(bufferRemaining == buffer.remaining());

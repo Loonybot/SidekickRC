@@ -1,6 +1,6 @@
 /// Sidekick capture logic.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import static com.loonybot.sidekick.Sidekick.MIN_STORAGE_MBS;
@@ -65,13 +65,13 @@ import org.firstinspires.ftc.robotcore.external.Telemetry;
 import org.firstinspires.ftc.robotcore.external.hardware.camera.CameraName;
 import org.firstinspires.ftc.robotcore.external.hardware.camera.WebcamName;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
+import org.firstinspires.ftc.robotcore.external.navigation.AngularVelocity;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
 import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit;
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryImpl;
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryInternal;
 import org.firstinspires.ftc.robotcore.internal.system.AppUtil;
-import org.firstinspires.inspection.InspectionState;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -116,10 +116,10 @@ class Section {
     // Constants describing the various sections. They won't be recorded in this order,
     // but *will* be uploaded in this order.
     static final byte METADATA           =  0; // String tokens, dynamic descriptors, manifest, etc.
-    static final byte PII                =  1; // Privacy-sensitive data, if any
-    static final byte ARCHIVE            =  2; // Archive records, usually the biggest section
-    static final byte LOGCAT             =  3; // Logcat section, if any
-    static final byte LIMELIGHT_VIDEO    =  4; // Used only PC-side
+    static final byte ARCHIVE            =  1; // Archive records, usually the biggest section
+    static final byte LOGCAT             =  2; // Logcat section, if any
+    static final byte RESERVED5          =  3;
+    static final byte RESERVED4          =  4;
     static final byte RESERVED3          =  5;
     static final byte RESERVED2          =  6;
     static final byte RESERVED1          =  7;
@@ -143,10 +143,9 @@ class Header {
     // Raw contents:
     byte[] bytes = new byte[SIZE]; /// Raw byte contents of the header
     int magic; /// Unique signature for all Sidekick files; value is [Signature#FILE_HEADER]
-    int libraryVersion; /// Library version number that created this file
-    int requiredAppVersion; /// Minimum app version required to read this file
-    int majorErrors; /// Bitmask of major errors; [MajorError] indicates the bit
-    int minorErrors; /// Bitmask of minor errors; [MinorError] indicates the bit
+    long libraryVersion; /// Library version number that created this file
+    long requiredAppVersion; /// Minimum app version required to read this file
+    boolean majorError; /// True if there was a major error and the file can't be loaded
     long startUnixTimeMs; /// Unix time when the capture started, in milliseconds
     Section[] sections = new Section[Section.COUNT]; /// Sections of the file
     // Byte total: 28+8*8=92
@@ -163,10 +162,9 @@ class Header {
         }
         ByteBuffer buffer = ByteBuffer.wrap(header.bytes);
         header.magic = buffer.getInt();
-        header.libraryVersion = buffer.getInt();
-        header.requiredAppVersion = buffer.getInt();
-        header.majorErrors = buffer.getInt();
-        header.minorErrors = buffer.getInt();
+        header.libraryVersion = buffer.getLong();
+        header.requiredAppVersion = buffer.getLong();
+        header.majorError = buffer.getInt() != 0;
         header.startUnixTimeMs = buffer.getLong();
         for (int i = 0; i < Section.COUNT; i++) {
             header.sections[i] = new Section(buffer.getInt(), buffer.getInt());
@@ -175,13 +173,12 @@ class Header {
     }
 
     /// Create the capture header that will go at the beginning of the file.
-    static ByteBuffer create(int majorErrors, int minorErrors, long startUnixTimeMs, Section[] sections) {
+    static ByteBuffer create(boolean majorError, long startUnixTimeMs, Section[] sections) {
         ByteBuffer buffer = ByteBuffer.allocate(Header.SIZE);
         buffer.putInt(Signature.FILE_HEADER);
-        buffer.putInt(Capture.LIBRARY_VERSION);
-        buffer.putInt(Capture.FILE_MIN_APP_VERSION);
-        buffer.putInt(majorErrors);
-        buffer.putInt(minorErrors);
+        buffer.putLong(Capture.LIBRARY_VERSION);
+        buffer.putLong(Capture.FILE_MIN_APP_VERSION);
+        buffer.putInt(majorError ? 1 : 0);
         buffer.putLong(startUnixTimeMs);
         for (Section section: sections) {
             buffer.putInt(section.offset);
@@ -203,7 +200,6 @@ class Signature {
     static final int ARCHIVE_RECORDS        = 0xA3F7C2D8;
     static final int LOGCAT                 = 0x2E9F3D7A;
     static final int MANIFEST               = 0x7A3D9F2E;
-    static final int PII                    = 0xEF82B9F3;
     static final int STRING_TOKENS          = 0xF7A9B2E1;
     static final int DYNAMIC_DESCRIPTORS    = 0x5E4F3A9B;
     static final int DEVICE_DESCRIPTORS     = 0x9B3A4F5E;
@@ -275,6 +271,8 @@ class RecordId {
     static final int STOPWATCH_START                       = 43;
     static final int STOPWATCH_STOP                        = 44;
     static final int POSE                                  = 45;
+    static final int BEGIN_NO_MOVEMENT                     = 46;
+    static final int END_NO_MOVEMENT                       = 47;
 
     // Meta data:
     static final int FIRST_DYNAMIC = 100; // First dynamic record ID
@@ -308,33 +306,6 @@ class VarargsFlags {
 class CanvasFlags {
     static final int INFERRED = 0x1; // Canvas call is inferred from a Dashboard queue
     static final int ROTATED_FIELD = 0x2; // Rendering assumes a rotated field
-}
-
-/// Minor errors indicate missing data but don't prevent captures from loading.
-enum MinorError {
-    CONFIGURATION,                  // 0x1: Error getting configuration file
-    FTC_DASHBOARD_FIELD_OVERLAY,    // 0x2: Error getting FTC Dashboard field overlay
-    LOGCAT,                         // 0x4: Error getting Logcat data
-    HARDWARE_MAP,                   // 0x8: Error getting hardware map
-    VOLTAGE_SENSOR,                 // 0x10: Error getting voltage sensor
-    PROXY_CLASS,                    // 0x20: Error creating proxy class
-    GAMEPAD,                        // 0x40: Error getting gamepad events
-    BULK_READ_LYNX_MODULE,          // 0x80: Error getting bulk data from Lynx module
-    CANVAS,                         // 0x100: Error getting FTC canvas data
-    LIMELIGHT_VIDEO_CAPTURE,        // 0x200: Error capturing Limelight video
-}
-
-/// Major errors are so severe they prevent captures from loading.
-enum MajorError {
-    // @@@ Nuke
-    INTERRUPTED_CAPTURE,            // 0x1: Capture was interrupted; only Logcat is available
-    DEVICE_ID_OVERFLOW,             // 0x2: Error getting device ID
-    RECORD_FORMAT_TOO_LONG,         // 0x4: Error getting record format
-    DEVICE_ID_TOO_LARGE,            // 0x8: Error getting record descriptor
-    STRING_TOKEN_OVERFLOW,          // 0x10: More than 65535 unique string tokens
-    RECORD_SIZE_TOO_LONG,           // 0x20: Record size exceeded chunk size
-    FILE_READ_ERROR,                // 0x40: Fatal error reading a file
-    FILE_WRITE_ERROR,               // 0x80: Fatal error writing a file
 }
 
 /// Bus types.
@@ -371,11 +342,6 @@ class ManifestJson {
     public String appBuildTime = ""; // "2026-02-04T19:00:19.296-0800"
     public boolean[] gamepadIsPs4 = new boolean[2]; // False if gamepad is Xbox-compatible, true if PS4
     public boolean isExcessive = false; // True if the accumulated capture size was truncated
-}
-
-/// Companion to [ManifestJson] that contains privacy-sensitive data.
-class PiiJson {
-    public String robotName = ""; // "417-B-RC"
 }
 
 /// Structure to describe a captured thread.
@@ -440,6 +406,26 @@ class DeviceChild {
 /// Principal class responsible for creating the capture.
 @SuppressWarnings({"unchecked", "rawtypes", "ReassignedVariable", "ResultOfMethodCallIgnored"}) // Can add "unused"
 class Capture {
+    /// Track state for the beginNoMovement/endNoMovement() APIs.
+    static class NoMovement {
+        int activeCount = 0; // Count of active no-movement brackets
+        IMU imu; // IMU reference for no-movement bracket
+        double rateTolerance; // Maximum rotation rate tolerance, degrees/s
+        float maxRate; // Maximum rate seen so far, degrees/s
+
+        // Return the current maximum rotation rate of all three dimensions.
+        float getImuMaxRate() {
+            if (imu == null) {
+                return 0;
+            } else {
+                AngularVelocity velocity = imu.getRobotAngularVelocity(AngleUnit.DEGREES);
+                return Math.max(Math.abs(velocity.xRotationRate),
+                       Math.max(Math.abs(velocity.yRotationRate),
+                                Math.abs(velocity.zRotationRate)));
+            }
+        }
+    }
+
     /// Descriptor for dynamic device API records and varargs records like [Sk#note]. This is not
     /// a static class as it needs to refer to the Capture object for the likes of
     /// [Capture#putFloatObject] et al.
@@ -467,7 +453,7 @@ class Capture {
             recordId = nextDynamicId;
             nextDynamicId += maxInstances;
             if (recordId > (RecordId.LAST_DYNAMIC + 1)) {
-                error(MajorError.DEVICE_ID_OVERFLOW);
+                majorError("Device ID overflow");
             }
 
             // Remember the representation of all of the argument types:
@@ -492,7 +478,7 @@ class Capture {
             recordId = nextDynamicId;
             nextDynamicId += deviceInfo.maxInstances;
             if (recordId > (RecordId.LAST_DYNAMIC + 1)) {
-                error(MajorError.DEVICE_ID_OVERFLOW);
+                majorError("Device ID overflow");
             }
             formatBuffer = schemaKey.format;
             allocatedDescriptors.add(this);
@@ -509,7 +495,7 @@ class Capture {
             recordId = nextDynamicId;
             nextDynamicId += deviceInfo.maxInstances;
             if (recordId > (RecordId.LAST_DYNAMIC + 1)) {
-                error(MajorError.DEVICE_ID_OVERFLOW);
+                majorError("Device ID overflow");
             }
 
             // Combine the argument and return types into a single array of parameter types:
@@ -579,7 +565,7 @@ class Capture {
             if (AnalogInput.class.isAssignableFrom(deviceClass)) {
                 AnalogInput analogInput = (AnalogInput) deviceObject;
                 AnalogInputController analogInputController
-                        = Sidekick.getField(analogInput, "controller", AnalogInputController.class);
+                        = Sidekick.getInstanceField(analogInput, "controller", AnalogInputController.class);
                 if (analogInputController != null) {
                     if (LynxAnalogInputController.class.isAssignableFrom(analogInputController.getClass())) {
                         lynxController = (LynxAnalogInputController) analogInputController;
@@ -588,7 +574,7 @@ class Capture {
             } else if (DigitalChannelImpl.class.isAssignableFrom(deviceClass)) {
                 DigitalChannelImpl digitalChannel = (DigitalChannelImpl) deviceObject;
                 DigitalChannelController digitalChannelController
-                        = Sidekick.getField(digitalChannel, "controller", DigitalChannelController.class);
+                        = Sidekick.getInstanceField(digitalChannel, "controller", DigitalChannelController.class);
                 if (digitalChannelController != null) {
                     if (LynxDigitalChannelController.class.isAssignableFrom(digitalChannelController.getClass())) {
                         lynxController = (LynxDigitalChannelController) digitalChannelController;
@@ -604,9 +590,9 @@ class Capture {
                 }
             }
 
-            LynxModule lynxModule = Sidekick.getField(lynxController, "module", LynxModule.class);
+            LynxModule lynxModule = Sidekick.getInstanceField(lynxController, "module", LynxModule.class);
             if (lynxModule == null) {
-                error(MinorError.BULK_READ_LYNX_MODULE);
+                minorError("Bulk read Lynx module");
                 return; // ====>
             }
 
@@ -717,23 +703,45 @@ class Capture {
         }
     }
 
-    /// Version numbers are 32-bit values encoded as major.minor.build:
+    /// Version numbers are 64-bit values encoded as major.minor.build:
     @SuppressWarnings("SameParameterValue")
-    static int CreateVersion(int major, int minor, int build) {
-        return (major << 24) | ( minor << 12) | build;
+    static long createVersion(int major, int minor, int patch) {
+        return ((long) major << 32) | ( (long) minor << 16) | patch;
+    }
+
+    // Get the 64-bit library version number from the built Version file, if it exists:
+    static long getLibraryVersion() {
+        // Version is built by gradle in all flavors except for the emulator:
+//        String versionString = Sidekick.getStaticField("com.loonybot.sidekick.Version",
+//                "LIBRARY_VERSION", String.class, "1.2.3");
+String versionString = BuildConfig.LIBRARY_VERSION;
+
+        String[] parts = versionString.split("\\.");
+        int major = Integer.parseInt(parts[0]);
+        int minor = Integer.parseInt(parts[1]);
+        int patch = Integer.parseInt(parts[2]);
+        return createVersion(major, minor, patch);
     }
 
     // This library's current version number is:
-    final static int LIBRARY_VERSION = CreateVersion(10, 0, 1);
+    final static long LIBRARY_VERSION = getLibraryVersion();
 
     // To load a file created by this library, the app has to have at least this version number:
-    final static int FILE_MIN_APP_VERSION = CreateVersion(0, 0, 1);
+    final static long FILE_MIN_APP_VERSION = createVersion(0, 0, 1);
 
     // To communicate via sockets with this library, the app needs this version number or better:
-    final static int SOCKET_MIN_APP_VERSION = CreateVersion(0, 0, 1);
+    final static long SOCKET_MIN_APP_VERSION = createVersion(0, 0, 1);
+
+    // Strings that are recorded in Logcat to mark opMode state changes:
+    final static String LOGCAT_OP_MODE_INIT = "The op mode initializes here";
+    final static String LOGCAT_OP_MODE_START = "The op mode starts here";
+    final static String LOGCAT_OP_MODE_STOP = "The op mode stops here";
+    final static String LOGCAT_OP_MODE_TIME_LIMIT = LOGCAT_OP_MODE_STOP + " (2 minute time limit)";
+    final static String LOGCAT_OP_MODE_EXCESSIVE_SIZE = LOGCAT_OP_MODE_STOP + " (excessive size)";
 
     // Constants:
     final static boolean DEBUG = true; // Enable debug code
+    final static long OP_MODE_TIME_LIMIT_NANOS = 10*1000*1000*1000L; // 121 seconds # @@@@@@@@@@@@
     final static int TICK_SHIFT = 8; // Downshift nanoTime() by this many bits to encode time ticks
     final static int TICK_MASK = 0xffffff; // Mask to extract time ticks from nanoTime() after shift
     final static byte NULL_TERMINATOR = 0; // We null-terminate all strings in the archive
@@ -765,9 +773,6 @@ class Capture {
     boolean isEnded; // True if done capturing and nothing more should be recorded
     boolean isExcessive; // True if the capture size is excessive and the capture should be ended
     ManifestJson manifest = new ManifestJson(); // State compendium saved with capture
-    PiiJson pii = new PiiJson(); // Privacy-sensitive data saved with capture
-    int minorErrors; /// Bitmask of [MinorError] capture issues seen that are non-fatal
-    int majorErrors; /// Bitmask of [MajorError] capture issues seen that are fatal for the capture
     int nextDynamicId = RecordId.FIRST_DYNAMIC; // ID of next dynamic record descriptor to be created
     int nextStringId = 1; // ID of next string token to be created; zero is reserved
     Sidekick sidekick; // Reference to the corresponding Sidekick object
@@ -799,6 +804,7 @@ class Capture {
     HashMap<Thread, ThreadDescriptor> threadDescriptorMap = new HashMap<>(); // Map thread to descriptor
     LinkedList<ThreadDescriptor> threadDescriptorList = new LinkedList<>(); // List of all descriptors, zero is reserved
     HashMap<LynxModule, LynxModuleInfo> lynxModuleMap = new HashMap<>(); // Not all Lynx modules may be present
+    boolean majorError; // True if an error was recorded that will prevent the capture from loading
     int processJiffyStart; // The process's jiffy count at the start of the capture
     int processJiffyDuration; // The process's total jiffy count, determined at the end of the capture
     long wallClockJiffyStart; // The start timer for wallClockJiffyDuration, in nano seconds
@@ -816,6 +822,7 @@ class Capture {
     String limelightAddress; // IP address of a Limelight camera found during Init, null if none
     LimelightVideo limelightCapture; // Video capture for the Limelight camera, null if not started
     int nextStopwatchId; // ID of the next stopwatch object to be created
+    NoMovement noMovement = new NoMovement(); // State for tracking beginNoMovement/endNoMovement APIs
 
     /// Generate a unique ID for a record. Guaranteed to be non-zero even if truncated to 16 bits.
     int generateUniqueness() {
@@ -825,16 +832,13 @@ class Capture {
         return uniquenessCounter;
     }
 
-    /// Record errors.
-    void error(MinorError error) { error(error, null); }
-    void error(MinorError error, @Nullable String message, Object... args) {
-        minorErrors |= (1 << error.ordinal());
-        Sidekick.logW(message != null ? String.format(message, args) : String.format("Minor error: %s", error));
+    /// Record capture errors.
+    void majorError(@NonNull String message, Object... args) {
+        Sidekick.logE(message, args);
+        majorError = true;
     }
-    void error(MajorError error) { error(error, null); }
-    void error(MajorError error, @Nullable String message, Object... args) {
-        majorErrors |= (1 << error.ordinal());
-        Sidekick.logE(message != null ? String.format(message, args) : String.format("Major error: %s", error));
+    void minorError(@NonNull String message, Object... args) {
+        Sidekick.logW(message, args);
     }
 
     /// The Capture's only constructor.
@@ -1107,7 +1111,7 @@ class Capture {
         isStarted = true;
         startNanoTime = nanoTime();
         startUnixTime = System.currentTimeMillis();
-        Sidekick.logI("▶ was pressed"); /// This message syncs [#startNanoTime] with Unix time
+        Sidekick.logI(LOGCAT_OP_MODE_START); /// This message syncs [#startNanoTime] with Unix time
 
         // Video recording files have the same root name as the capture; only the extension differs:
         String videoRootName = Sidekick.SUBDIRECTORY + "/" + dateAndTime;
@@ -1137,7 +1141,7 @@ class Capture {
         }
         // If the capture size is excessive, this is a safe place to end it:
         if (isExcessive) {
-            endCapture();
+            endCapture(LOGCAT_OP_MODE_EXCESSIVE_SIZE);
             return false; // ====>
         }
 
@@ -1194,7 +1198,7 @@ class Capture {
             // supply a buffer that's big enough for the request:
             chunk = ByteBuffer.allocateDirect(requestedSize);
             chunkRemaining = 0;
-            error(MajorError.RECORD_SIZE_TOO_LONG);
+            majorError("Record size too large: %d", requestedSize);
         }
 
         /// Check to see if the file size is excessive and the capture should be ended. We can't
@@ -1339,7 +1343,7 @@ class Capture {
         // Allocate the string:
         tokenId = nextStringId;
         if (tokenId > STRING_TOKEN_LAST_ALLOCATABLE_ID) {
-            error(MajorError.STRING_TOKEN_OVERFLOW);
+            majorError("String token table overflow");
             return STRING_TOKEN_LAST_ALLOCATABLE_ID;
         }
         nextStringId++;
@@ -1513,7 +1517,7 @@ class Capture {
                 try { // lastBulkData = lynxInfo.module.lastBulkData:
                     lastBulkData = (LynxModule.BulkData) capture.lynxModuleLastBulkDataField.get(lynxInfo.module);
                 } catch (IllegalAccessException e) {
-                    error(MinorError.BULK_READ_LYNX_MODULE);
+                    minorError("Bulk read Lynx module");
                     return; // ====>
                 }
 
@@ -1524,7 +1528,7 @@ class Capture {
                     try { // bulkResponse = lastBulkData.resp:
                         bulkResponse = (LynxGetBulkInputDataResponse) capture.bulkDataRespField.get(lastBulkData);
                     } catch (IllegalAccessException e) {
-                        error(MinorError.BULK_READ_LYNX_MODULE);
+                        minorError("Bulk read Lynx module");
                         return; // ====>
                     }
 
@@ -1716,10 +1720,10 @@ class Capture {
 
             // Overflow checks:
             if (descriptor.formatBuffer.length > 255) {
-                error(MajorError.RECORD_FORMAT_TOO_LONG);
+                majorError("Record format too long");
             }
             if (descriptor.deviceId > 255) {
-                error(MajorError.DEVICE_ID_TOO_LARGE);
+                majorError("Device ID too large");
             }
         }
     }
@@ -1753,6 +1757,8 @@ class Capture {
     /// files, and it can get microsecond precision.
     @SuppressWarnings("StatementWithEmptyBody")
     void serializeLogcat() {
+        Sidekick.logI("Logcat has stopped recording.");
+
         StringBuilder cmd = new StringBuilder();
         cmd.append("logcat ");
         cmd.append("-v usec ");
@@ -1776,7 +1782,7 @@ class Capture {
         // Now serialize the resulting text file:
         File tempLogcatFile = new File(TEMP_LOGCAT_FILE);
         if (!tempLogcatFile.exists()) {
-            error(MinorError.LOGCAT);
+            minorError("Logcat file not found");
         } else {
             if ((chunkRemaining -= 8) < 0)
                 nextChunk();
@@ -1792,7 +1798,7 @@ class Capture {
                 }
             } catch (IOException e) {
                 // The capture file is corrupt if we couldn't fully read the file:
-                error(MajorError.FILE_READ_ERROR);
+                majorError("Logcat file read error");
             }
             chunkRemaining = chunk.remaining(); // Adjust for data we just added directly
             tempLogcatFile.delete();
@@ -1801,14 +1807,9 @@ class Capture {
 
     /// Serialize the robot's configuration file.
     void serializeConfiguration() {
-        String configName = null;
-        try {
-            Class<?> webInfoClass = Class.forName("org.firstinspires.ftc.robotcore.internal.webserver.RobotControllerWebInfo");
-            Field configNameField = webInfoClass.getDeclaredField("cachedConfigName");
-            configNameField.setAccessible(true);
-            configName = (String) configNameField.get(null);
-        } catch (ClassNotFoundException|NoSuchFieldException|IllegalAccessException ignored) {}
-
+        String configName = Sidekick.getStaticField(
+                "org.firstinspires.ftc.robotcore.internal.webserver.RobotControllerWebInfo",
+                "cachedConfigName", String.class, null);
         if (configName != null) {
             // @@@ Move to Sidekick and read at Sidekick init for device names for sampling
             File configFile = new File(Sidekick.SD_CARD_PATH + "/FIRST/" + configName + ".xml");
@@ -1828,13 +1829,13 @@ class Capture {
                     }
                 } catch (IOException e) {
                     // The capture file is corrupt if we couldn't fully read the file:
-                    error(MajorError.FILE_READ_ERROR);
+                    majorError("Configuration file read error");
                 }
                 chunkRemaining = chunk.remaining(); // Adjust for data we just added directly
                 return; // Success!
             }
         }
-        error(MinorError.CONFIGURATION); // Failure!
+        minorError("Configuration file not found");
     }
 
     /// Save all of the thread descriptors into chunks.
@@ -1903,20 +1904,6 @@ class Capture {
         putBytes(data);
     }
 
-    /// Serialize privacy-sensitive data.
-    void serializePii() {
-        InspectionState inspection = new InspectionState();
-        inspection.initializeLocal();
-        pii.robotName = inspection.deviceName;
-
-        byte[] data = Sidekick.gson.toJson(pii).getBytes(UTF8);
-        if ((chunkRemaining -= 8) < 0)
-            nextChunk();
-        chunk.putInt(Signature.PII);
-        chunk.putInt(data.length);
-        putBytes(data);
-    }
-
     /// Initialize Lynx module information for Bulk Read processing.
     void initializeLynxModuleInfo() {
         try {
@@ -1925,19 +1912,19 @@ class Capture {
             lynxModuleLastBulkDataField = LynxModule.class.getDeclaredField("lastBulkData");
             lynxModuleLastBulkDataField.setAccessible(true);
         } catch (NoSuchFieldException e) {
-            error(MinorError.BULK_READ_LYNX_MODULE);
+            minorError("Bulk read Lynx module");
             return; // ====>
         }
 
         // Be sure to use the original hardware map to avoid our 'getAll()' wrap!
         List<LynxModule> lynxModuleList = hardwareMap.originalMap.getAll(LynxModule.class);
         if (lynxModuleList.isEmpty()) {
-            error(MinorError.BULK_READ_LYNX_MODULE);
+            minorError("Bulk read Lynx module");
         }
         // 'lynxModuleMap' does not have to be complete in the event of failure:
         manifest.lynxAddresses = new int[lynxModuleList.size()];
         for (LynxModule module: lynxModuleList) {
-            Object bulkCachingLock = Sidekick.getField(module, "bulkCachingLock", Object.class);
+            Object bulkCachingLock = Sidekick.getInstanceField(module, "bulkCachingLock", Object.class);
             if ((bulkCachingLock != null) && (lynxModuleMap.size() < MAX_LYNX_COUNT)) {
                 LynxModuleInfo lynxInfo = new LynxModuleInfo(bulkCachingLock);
                 lynxInfo.module = module;
@@ -1945,7 +1932,7 @@ class Capture {
                 manifest.lynxAddresses[lynxInfo.id] = module.getModuleAddress();
                 lynxModuleMap.put(module, lynxInfo);
             } else {
-                error(MinorError.BULK_READ_LYNX_MODULE, "Couldn't prepare for bulk reads");
+                minorError("Couldn't prepare for bulk reads");
             }
         }
     }
@@ -1980,6 +1967,17 @@ class Capture {
                 }
             }
 
+            // Delete any files older than the specified number of retention days:
+            int retentionDays = Sidekick.instance.retentionDays;
+            long cutoffMillis = System.currentTimeMillis() - retentionDays * 24L * 60L * 60L * 1000L;
+            for (File f : sidekickFiles) {
+                long lastModified = f.lastModified();
+                if ((lastModified != 0) && (lastModified < cutoffMillis)) {
+                    Sidekick.logI("Deleting " + f.getName());
+                    f.delete();
+                }
+            }
+
             // Now delete the oldest files until there's sufficient space:
             for (File f: sidekickFiles) {
                 if (stat.getAvailableBytes() >= MIN_STORAGE_MBS*1024*1024)
@@ -1995,14 +1993,14 @@ class Capture {
         assert(Thread.holdsLock(sidekickLock));
         clearSpaceForNewCapture();
         if (!isGamepadHooked) {
-            error(MinorError.GAMEPAD);
+            minorError("Gamepad");
         }
 
         // Initialize the file and allocate a chunk for capturing, write the file header, and
         // initialize the archive section:
         sidekick.fileWorker.submit(new FileWorker.OpenMessage(dateAndTime));
         chunk = sidekick.fileWorker.getChunk();
-        chunk.put(Header.create(0, 0, startUnixTime, sections));
+        chunk.put(Header.create(false, startUnixTime, sections));
         sections[Section.ARCHIVE].offset = getOffset();
         chunk.putInt(Signature.ARCHIVE_RECORDS);
         chunkRemaining = chunk.remaining();
@@ -2022,19 +2020,24 @@ class Capture {
         // Lynx Module info is used for Bulk Read processing:
         initializeLynxModuleInfo();
 
-        Sidekick.logI("INIT was pressed"); // Mark the start of an opMode
+        Sidekick.logI(LOGCAT_OP_MODE_INIT); // Mark the start of an opMode
     }
 
     /// Stop capturing and save all of the metadata.
-    void endCapture() {
+    void endCapture(String logcatMarkerMessage) {
         synchronized (sidekickLock) {
-            assert(!isEnded);
+            // We may have already ended due to time limit or excessive size:
+            if (isEnded) {
+                return; // ====>
+            }
+            long startMillis = System.currentTimeMillis();
+            Sidekick.logI(logcatMarkerMessage); // Mark the end of the opMode
 
             // Stop Limelight recording:
             if (limelightCapture != null) {
                 limelightCapture.stop();
                 if (limelightCapture.hasError) {
-                    error(MinorError.LIMELIGHT_VIDEO_CAPTURE);
+                    minorError("Limelight video capture");
                 }
             }
 
@@ -2042,7 +2045,7 @@ class Capture {
             Socket.broadcastStopScreenRecord();
 
             // If the opMode terminated because of an unhandled exception, record it:
-            RuntimeException exception = Sidekick.getField(opMode,"exception", RuntimeException.class);
+            RuntimeException exception = Sidekick.getInstanceField(opMode,"exception", RuntimeException.class);
             if (exception != null) {
                 if (beginRecord(RecordId.UNHANDLED_EXCEPTION, 0)) {
                     StringWriter writer = new StringWriter();
@@ -2066,12 +2069,7 @@ class Capture {
             // Snapshot the current thread state:
             snapshotThreadsAndJiffies(false);
 
-            // Serialize Logcat to its own section:
-            sections[Section.LOGCAT].offset = getOffset();
-            serializeLogcat();
-            sections[Section.LOGCAT].size = getOffset() - sections[Section.LOGCAT].offset;
-
-            // Serialize the Metadata section:
+            // Serialize the Metadata section.
             sections[Section.METADATA].offset = getOffset();
             serializeManifest();
             serializeConfiguration();
@@ -2082,21 +2080,24 @@ class Capture {
             serializeThreadDescriptors();
             sections[Section.METADATA].size = getOffset() - sections[Section.METADATA].offset;
 
-            // PII gets its own section:
-            sections[Section.PII].offset = getOffset();
-            serializePii();
-            sections[Section.PII].size = getOffset() - sections[Section.PII].offset;
+            // Serialize Logcat to its own section. This marks the last point where Logcat errors
+            // will get recorded into the capture.
+            sections[Section.LOGCAT].offset = getOffset();
+            serializeLogcat();
+            sections[Section.LOGCAT].size = getOffset() - sections[Section.LOGCAT].offset;
 
             // Queue the last chunk and then close the file:
             CountDownLatch limelightDoneLatch = limelightCapture != null ? limelightCapture.doneLatch : null;
             sidekick.fileWorker.submit(new FileWorker.WriteMessage(chunk));
-            sidekick.fileWorker.submit(new FileWorker.CloseMessage(majorErrors, minorErrors, sections,
-                    opMode.getClass(), dateAndTime, startUnixTime, startNanoTime, endNanoTime,
+            sidekick.fileWorker.submit(new FileWorker.CloseMessage(sections,
+                    opMode.getClass(), majorError, dateAndTime, startUnixTime, startNanoTime, endNanoTime,
                     sidekick.lastRunNumber, limelightDoneLatch, fileDoneLatch));
 
             // Disable any further recording on this capture context:
             currentThreadId = 0; /// Set to zero to force [#threadSwitchAndBookkeeping] calls
             isEnded = true;
+
+            Sidekick.logI("Ending the capture took %d ms", System.currentTimeMillis() - startMillis);
         }
     }
 
@@ -2139,7 +2140,7 @@ class Capture {
             ByteBuffer inBuffer = ByteBuffer.wrap(input, headerOffset, input.length - headerOffset);
             byte version = inBuffer.get();
             if (version < 3) {
-                error(MinorError.GAMEPAD);
+                minorError("Gamepad");
                 return; // ====>
             }
 
@@ -2165,7 +2166,7 @@ class Capture {
             byte legacyType = inBuffer.get(); // LegacyType
 
             if ((gamepadUser < 1) || (gamepadUser > 2)) {
-                error(MinorError.GAMEPAD);
+                minorError("Gamepad");
                 return; // ====>
             }
 
@@ -2224,6 +2225,45 @@ class Capture {
                 assertChunk();
             }
         }
+    }
+
+    /// API to mark the beginning of a period of no movement. Returns true if an IMU was found.
+    boolean beginNoMovement(float rateTolerance) {
+        synchronized (sidekickLock) {
+            if (noMovement.activeCount++ == 0) {
+                Set<String> imuNames = hardwareMap.getAllNames(IMU.class);
+                if (!imuNames.isEmpty()) {
+                    noMovement.imu = hardwareMap.originalMap.get(IMU.class, imuNames.iterator().next());
+                }
+                // Record the event:
+                if (beginRecord(RecordId.BEGIN_NO_MOVEMENT, 4)) {
+                    chunk.putFloat(rateTolerance);
+                    assertChunk();
+                }
+            }
+
+            // Remember the preferred tolerance and get the current rate:
+            noMovement.rateTolerance = rateTolerance;
+            noMovement.maxRate = Math.max(noMovement.maxRate, noMovement.getImuMaxRate());
+        }
+        return noMovement.imu != null;
+    }
+
+    /// API to mark the ending of a period of no movement.
+    boolean endNoMovement() {
+        boolean success = (noMovement.imu != null); // True if the maximum rate was within tolerance
+        synchronized (sidekickLock) {
+            noMovement.maxRate = Math.max(noMovement.maxRate, noMovement.getImuMaxRate());
+            success &= (noMovement.maxRate <= noMovement.rateTolerance);
+            if ((noMovement.activeCount > 0) && (--noMovement.activeCount == 0)) {
+                if (beginRecord(RecordId.END_NO_MOVEMENT, 5)) {
+                    chunk.put(success ? (byte) 1 : (byte) 0);
+                    chunk.putFloat(noMovement.maxRate);
+                    assertChunk();
+                }
+            }
+        }
+        return success;
     }
 
     /// API to mark the beginning/end of a loop.
@@ -2845,7 +2885,7 @@ class Capture {
                         Object value = field.get(original);
                         field.set(this, value);
                     } catch (IllegalAccessException e) {
-                        error(MinorError.HARDWARE_MAP, "*** HardwareMap failure!");
+                        minorError("HardwareMap failure");
                     }
                 }
             }
@@ -2871,7 +2911,7 @@ class Capture {
                     Sidekick.logI("*** Wrapped VoltageSensor '%s'", entry.getKey());
                 }
             } else {
-                error(MinorError.VOLTAGE_SENSOR);
+                minorError("Voltage sensor");
             }
 
             Sidekick.logI("*** Wrapped HardwareMap");
@@ -2972,7 +3012,7 @@ class Capture {
             sidekick.proxyBuilder.primeCache(originalClass);
             Class<?> proxyClass = sidekick.proxyBuilder.getCache(originalClass);
             if (proxyClass == null) {
-                error(MinorError.PROXY_CLASS, "No proxy class for %s", originalClass.getSimpleName());
+                minorError("No proxy class for %s", originalClass.getSimpleName());
                 return originalObject; // ====>
             }
 
@@ -2999,7 +3039,7 @@ class Capture {
                 // Determine the index to use as the instance identifier:
                 instanceId = deviceInfo.deviceNames.size();
                 if (instanceId >= deviceInfo.maxInstances) {
-                    error(MinorError.PROXY_CLASS, "Too many instances of %s: %d", deviceName, instanceId);
+                    minorError("Too many instances of %s: %d", deviceName, instanceId);
                     return originalObject; // ====>
                 }
 
@@ -3008,7 +3048,7 @@ class Capture {
                         deviceInfo, 0, instanceId);
                 T proxyInstance = instantiateProxy(proxyClass, context, originalObject);
                 if (proxyInstance == null) {
-                    error(MinorError.PROXY_CLASS);
+                    minorError("Proxy class");
                     return originalObject; // ====>
                 }
 
@@ -3030,11 +3070,11 @@ class Capture {
 
                 // If this is the first Limelight seen, stash its IP address for video capture at Start:
                 if ((deviceInfo.isLimelight) && (capture.limelightAddress == null)) {
-                    InetAddress inetAddress = Sidekick.getField(originalObject, "inetAddress", InetAddress.class);
+                    InetAddress inetAddress = Sidekick.getInstanceField(originalObject, "inetAddress", InetAddress.class);
                     if (inetAddress != null) {
                         capture.limelightAddress = inetAddress.getHostAddress();
                     } else {
-                        error(MinorError.LIMELIGHT_VIDEO_CAPTURE, "Couldn't get Limelight IP address.");
+                        minorError("Limelight IP address");
                     }
                 }
                 return proxyInstance;
@@ -3057,7 +3097,7 @@ class Capture {
             }
 
             // Failure case:
-            error(MinorError.PROXY_CLASS);
+            minorError("Proxy class");
             return originalObject;
         }
 

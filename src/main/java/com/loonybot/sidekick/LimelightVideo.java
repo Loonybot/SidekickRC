@@ -1,6 +1,6 @@
 /// Thread logic for capturing Limelight video.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import static java.lang.System.nanoTime;

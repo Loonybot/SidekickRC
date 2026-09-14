@@ -1,6 +1,6 @@
 /// Common interface for all objects wrapped by the Sidekick proxy builder.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 /// All Sidekick proxies implement this interface.

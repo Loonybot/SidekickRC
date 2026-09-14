@@ -1,6 +1,6 @@
 /// Logic for the Sidekick sampling thread.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import android.annotation.SuppressLint;
@@ -583,7 +583,7 @@ class DashboardSampler {
             } catch (ClassNotFoundException | NoSuchFieldException | IllegalAccessException e) {
                 // Disable FTC telemetry capture and note the error:
                 pendingTelemetry = null;
-                Capture.instance.error(MinorError.FTC_DASHBOARD_FIELD_OVERLAY);
+                Capture.instance.minorError("FTC Dashboard field overlay");
             }
         }
         return pendingTelemetry;
@@ -942,6 +942,12 @@ class SampleWorker {
                         capture.recordGlobalMessage(false, globalWarningMessage);
                     }
                 }
+            }
+            // End the capture if the opMode has passed 120 seconds:
+            if ((capture.startNanoTime != capture.initNanoTime) &&
+                    ((currentNanoTime - capture.startNanoTime) > Capture.OP_MODE_TIME_LIMIT_NANOS) &&
+                    !(capture.isEnded)) {
+                capture.endCapture(Capture.LOGCAT_OP_MODE_TIME_LIMIT);
             }
         }
     }

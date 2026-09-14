@@ -1,6 +1,6 @@
 /// Sidekick public APIs.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import androidx.annotation.NonNull;
@@ -12,6 +12,9 @@ import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
  */
 @SuppressWarnings({"unused"})
 public class Sk {
+    // Default value for Sk.beginNoMovement():
+    public static final double DEFAULT_ROTATION_RATE_TOLERANCE = 1.0; // Degrees/s
+
     ////////////////////////////////////////////////////////////////////////////////////////////////
     /// Sidekick data structures.
     /**
@@ -35,13 +38,13 @@ public class Sk {
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////
-    /// Invoke the following Sidekick configuration APIs before the first opMode begins. Call
-    /// them from an @OnCreate method on a custom class, like this:
+    /// To invoke the following Sidekick configuration APIs before the first opMode begins, call
+    /// them from an @OnCreate method in a custom class, like this:
     ///        @SuppressWarnings("unused")
     ///        class ConfigureSidekick {
     ///            @OnCreate
     ///            public static void onCreate(Context context) {
-    ///                Sk.disable(); // Temporarily disable Sidekick
+    ///                Sk.enable(false); // Temporarily disable Sidekick
     ///            }
     ///        }
     /// You only need one copy of this code anywhere in your project. It will affect all of your
@@ -50,22 +53,28 @@ public class Sk {
     /// Client to reflash the system.
 
     /**
-     * Enable Sidekick and inhibit Sidekick's enable/disable opMode. This must be called from
-     * an @OnCreate method.
+     * Enable or disable Sidekick. This must be called from an @OnCreate method. A side effect
+     * is that this removes the enable/disable opMode that Sidekick adds.
      */
-    public static void enable() {
-        if (!Sidekick.setApiRequestedState(ApiRequestedState.ENABLED)) {
+    public static void enable(boolean enable) {
+        ApiRequestedState state = enable ? ApiRequestedState.ENABLED : ApiRequestedState.DISABLED;
+        if (!Sidekick.setApiRequestedState(state)) {
             throw new IllegalStateException("Sk.enable() can ony be called from an @OnCreate method.");
         }
     }
 
     /**
-     * Disable Sidekick and inhibit Sidekick's enable/disable opMode. This must be called from
-     * an @OnCreate method.
+     * Sidekick automatically captures data every time an opMode is run. This method allows
+     * you to specify how how long to keep that data before it's automatically deleted.
+     * Must be called from an @OnCreate method.
+     *
+     * @param days Delete Sidekick data from the robot after this many days.
      */
-    public static void disable() {
-        if (!Sidekick.setApiRequestedState(ApiRequestedState.DISABLED)) {
-            throw new IllegalStateException("Sk.disable() can ony be called from an @OnCreate method.");
+    public static void setRetentionDays(int days) {
+        if (Sidekick.isEnabled) {
+            if (!Sidekick.instance.setRetentionDays(days)) {
+                throw new IllegalStateException("Sk.setRetentionDays() can ony be called from an @OnCreate method.");
+            }
         }
     }
 
@@ -77,23 +86,11 @@ public class Sk {
      *
      * @param issueCodes A list of issue codes to disable. For example, to disable issues
      *                   with the codes 101 and 107, specify
-     *                   {@code Sk.config.disableIssues(101, 107)}.
+     *                   {@code Sk.suppressIssues(101, 107)}.
      */
     public static void suppressIssues(int... issueCodes) {
         if (Sidekick.isEnabled) {
             Sidekick.instance.suppressIssues(issueCodes);
-        }
-    }
-
-    /**
-     * Sidekick automatically captures data every time an opMode is run. This method allows
-     * you to specify how how long to keep that data before it's automatically deleted.
-     *
-     * @param days Delete Sidekick data from the robot after this many days.
-     */
-    public static void setRetentionDays(int days) {
-        if (Sidekick.isEnabled) {
-            Sidekick.instance.setRetentionDays(days);
         }
     }
 
@@ -267,4 +264,43 @@ public class Sk {
             Capture.instance.pose(pose);
         }
     }
+
+    /**
+     * Call this before performing gyro calibration for devices that requires the robot not to move,
+     * such as when calling GoBildaPinpointDriver.recalibrateIMU() or SparkFunOTOS.calibrateImu().
+     * In conjunction with Sk.endNoMovement(), this will use the built-in IMU to verify that the
+     * robot wasn't moved.
+     *
+     * @param rotationRateTolerance Maximum rotation rate tolerance, degrees/s.
+     * @throws IllegalStateException if no IMU is found.
+     */
+    public static void beginNoMovement(double rotationRateTolerance) {
+        if (Capture.instance != null) {
+            if (!Capture.instance.beginNoMovement((float) rotationRateTolerance)) {
+                throw new IllegalStateException("An IMU is required to call beginNoMovement(). "
+                        + "No IMU was found even though every Control Hub and Expansion Hub has one. "
+                        + "Someone deleted the IMU in the Configuration for I2C bus 0.");
+            }
+        }
+    }
+    public static void beginNoMovement() {
+        beginNoMovement(DEFAULT_ROTATION_RATE_TOLERANCE);
+    }
+
+    /**
+     * Call this after performing gyro calibration for devices that requires the robot not to move,
+     * such as when calling GoBildaPinpointDriver.recalibrateIMU() or SparkFunOTOS.calibrateImu().
+     * In conjunction with Sk.beginNoMovement(), this will use the built-in IMU to verify that the
+     * robot wasn't moved.
+     *
+     * @return True the robot was not moved (success), false if it was moved (failure).
+     */
+    public static boolean endNoMovement() {
+        boolean result = true; // Default to success
+        if (Capture.instance != null) {
+            result = Capture.instance.endNoMovement();
+        }
+        return result;
+    }
+
 }

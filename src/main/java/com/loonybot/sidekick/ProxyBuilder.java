@@ -1,6 +1,6 @@
 /// Builder for the Byte Buddy proxies that wrap the SDK HardwareDevice objects.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import android.content.Context;

@@ -1,6 +1,6 @@
 /// Sidekick object for timing stuff.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 /**

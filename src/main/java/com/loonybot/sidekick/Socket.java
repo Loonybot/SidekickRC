@@ -1,6 +1,6 @@
 /// Socket logic for managing Sidekick communication with the PC.
 ///
-/// Copyright Andrew Goossen.
+/// Copyright James Goossen.
 package com.loonybot.sidekick;
 
 import com.google.gson.JsonArray;
@@ -157,7 +157,7 @@ class Socket extends NanoWSD.WebSocket {
     /// be a newer version than the app, tell the app our minimum app version.
     void handleGetVersions(JsonObject request) {
         JsonObject response = createResponse(request);
-        int ignoredAppVersion = (int) payloadGet(request, "app_version", 0);
+        long ignoredAppVersion = (int) payloadGet(request, "app_version", 0);
 
         response.addProperty("library_version", Capture.LIBRARY_VERSION);
         response.addProperty("required_app_version", Capture.SOCKET_MIN_APP_VERSION);
@@ -189,8 +189,10 @@ class Socket extends NanoWSD.WebSocket {
                 // the capture has already been ended (e.g., because it hit 120 seconds), the
                 // latch will already be closed.
                 try {
-                    // Note that we intentionally don't hold any lock here:
-                    Capture.instance.fileDoneLatch.await(5000, TimeUnit.MILLISECONDS);
+                    // Note that we intentionally don't hold any lock here.
+                    if (!Capture.instance.fileDoneLatch.await(5000, TimeUnit.MILLISECONDS)) {
+                        Sidekick.logW("Timed out waiting for capture file to close");
+                    }
                 } catch (InterruptedException ignored) {}
             }
         }
