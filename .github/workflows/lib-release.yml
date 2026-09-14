@@ -52,6 +52,7 @@ jobs:
       # ------------------------------
       - name: Install Android platform + build-tools
         run: |
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
           yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" \
                      "platforms;android-30" \
