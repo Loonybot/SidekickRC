@@ -46,12 +46,13 @@ jobs:
 
       # ------------------------------
       # Install Android SDK + build-tools
+      # ubuntu-latest runners ship with an Android SDK preinstalled, so we use
+      # its sdkmanager directly instead of android-actions/setup-android@v3,
+      # which currently fails trying to install the removed "tools" package.
       # ------------------------------
-      - name: Install Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android platform + build-tools
         run: |
+          yes | sdkmanager --licenses > /dev/null || true
           sdkmanager "platform-tools" \
                      "platforms;android-30" \
                      "build-tools;30.0.3"
