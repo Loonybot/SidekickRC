@@ -44,6 +44,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IllegalFormatException;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
@@ -85,17 +86,21 @@ class ReceiveLoopCallbacks implements RecvLoopRunnable.RecvLoopCallback {
 public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// Package-private class for storing the serializer and its default object.
     static class SerializerInfo<T> {
-        Class<?> klass; // Class type that the serializer applies to
+        Class<? extends T> klass; // Class type that the serializer applies to
         int identifier; // Identifier of this serializer; increments on every one, starts from zero
         Sk.Serializer<T> serializer; // Serializer for this type
         Object[] prototypeOutput; // Serialized sample that gives us the output object types
         String format; // Format describing parameter names and units, e.g., "x=in, y=in, heading=rad"
-        SerializerInfo(Class<?> klass, int identifier, Sk.Serializer<T> serializer, Object[] prototypeOutput, String format) {
+        SerializerInfo(Class<? extends T> klass, int identifier, Sk.Serializer<T> serializer, Object[] prototypeOutput, String format) {
             this.klass = klass;
             this.identifier = identifier;
             this.serializer = serializer;
             this.prototypeOutput = prototypeOutput;
             this.format = format;
+        }
+
+        Object[] serialize(Object value) {
+            return serializer.serialize(klass.cast(value));
         }
     }
 
@@ -126,15 +131,17 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     // True constants:
     final static int WEB_SOCKET_PORT = 9090; // Port for the Sidekick web listener
     final static String TAG = "Sidekick"; // Identifier for Logcat error logging
-    final static long MIN_STORAGE_MBS = 100; // Always keep this many megabytes free in "/sdcard"
-    final static String SD_CARD_PATH = Environment.getExternalStorageDirectory().getPath(); // AKA '/sdcard' sans trailing slash
+    final static long MIN_STORAGE_MBS = 64; // Always try to keep this many megabytes free in "/sdcard"
+    @SuppressWarnings("deprecation")
+    final static String SD_CARD_PATH = Environment.getExternalStorageDirectory().getAbsolutePath(); // AKA '/sdcard' sans trailing slash
     final static String SUBDIRECTORY = SD_CARD_PATH + "/sidekick"; // Subdirectory for all captures
     final static String TEMP_LOGCAT_FILE = SUBDIRECTORY + "/logcat.temporary";
     final static boolean isPC = !"The Android Project".equals(System.getProperty("java.vm.name"))
             && !Objects.requireNonNull(System.getProperty("java.runtime.name")).contains("Android");
+    final static String FLOODGATE_SENSOR = "floodgateSensor"; // Name of goBilda sensor to measure current draw of entire robot
 
     // Effective constants:
-    final static Sidekick instance = new Sidekick(); // Internal sidekick object, always non-null after static init
+    final static Sidekick instance = new Sidekick(); // Singleton
     final static Gson gson = new Gson(); // For creating JSON files
     final static Objenesis objenesis = new ObjenesisStd(); // ByteBuddy requirement
     final static Object sidekickLock = new Object(); // Master thread lock for Sidekick
@@ -149,8 +156,8 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     BiFunction<Integer, Object, Object> emulatorCallback; // Emulator enlightenment callback, if any
     ProxyBuilder proxyBuilder; // Byte Buddy proxy builder
     String appBuildTime = ""; // Build time of the currently running app
-    // Map of serializers for custom types:
-    @SuppressWarnings({"rawtypes"}) HashMap<Class<?>, SerializerInfo> serializersMap = new HashMap<>();
+    List<CounterDescriptor> counters = new LinkedList<>(); // List of possible counters
+    HashMap<Class<?>, SerializerInfo<?>> serializersMap = new HashMap<>(); // Map of serializers for custom types
     LinkedList<SerializerInfo<?>> serializersList = new LinkedList<>(); // List of all serializers
     Set<Integer> suppressedIssues = new HashSet<>(); // Issue codes that the user wants suppressed
     ReceiveLoopCallbacks receiveLoopCallbacks = new ReceiveLoopCallbacks(); // For Gamepad hooks
@@ -158,6 +165,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     HashMap<Thread, ThreadRegister> threadRegistry = new HashMap<>(); // Registered threads
     String captureName = ""; // Name specified by the user for the current capture; includes ".sidekick"
     int retentionDays = 7; // Default retention period, in days
+    String[] userSetSamplers = null; // If non-null, the user has specified a set of counter IDs to sample
 
     final private NanoWSD server = new NanoWSD(WEB_SOCKET_PORT) {
         @Override protected WebSocket openWebSocket(IHTTPSession handshake) {
@@ -213,10 +221,24 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         }
     }
 
-    /// Register an object serializer.
+    /// Set the API-invoked enable/disable state.
+    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
+    static boolean setApiRequestedState(ApiRequestedState state) {
+        synchronized (sidekickLock) {
+            // The API can run only if it hasn't initialized yet:
+            if (isInitialized) {
+                return false;
+            }
+            apiRequestedState = state;
+            return true;
+        }
+    }
+
+    /// API to register an object serializer.
     <T> void registerSerializer(@NonNull T sample, @NonNull String format, @NonNull Sk.Serializer<T> serializer) {
         synchronized(sidekickLock) {
-            Class<?> klass = sample.getClass();
+            @SuppressWarnings("unchecked") // Valid cast from sample.getClass() to Class<? extends T>
+            Class<? extends T> klass = (Class<? extends T>) sample.getClass();
             if (!serializersMap.containsKey(klass)) {
                 Object[] prototypeOutput;
                 // Call the user's serializer to generate a sample object that we'll use for type
@@ -238,16 +260,11 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         }
     }
 
-    /// Set the API-invoked enable/disable state.
-    @SuppressWarnings("BooleanMethodIsAlwaysInverted")
-    static boolean setApiRequestedState(ApiRequestedState state) {
-        synchronized (sidekickLock) {
-            // The API can run only if it hasn't initialized yet:
-            if (isInitialized) {
-                return false;
-            }
-            apiRequestedState = state;
-            return true;
+    /// API to set the list of counters to be sampled and recorded into captures.
+    void setSamplers(String... ids) {
+        synchronized(sidekickLock) {
+            userSetSamplers = ids;
+            Realtime.forceActiveCounterUpdate();
         }
     }
 
@@ -258,7 +275,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
             if (isInitialized) {
                 return false;
             }
-            Sidekick.instance.retentionDays = days;
+            Sidekick.instance.retentionDays = Math.max(days, 1);
             return true;
         }
     }
@@ -272,18 +289,9 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         }
     }
 
-    /// Private API to set the capture's file name.
-    void setCaptureName(String name) {
-        // Verify that the name ends in ".sidekick":
-        if (!name.endsWith(".sidekick")) {
-            name += ".sidekick";
-        }
-        captureName = name;
-    }
-
     /// API to register a thread with the thread registry. NOTE: This can't take a thread as an
     /// argument because we can only query the Linux TID from the current thread.
-    void registerThreadStart(String threadName) {
+    void beginThread(String threadName) {
         synchronized(sidekickLock) {
             Thread thread = Thread.currentThread();
             ThreadRegister register = new ThreadRegister(android.os.Process.myTid(), threadName);
@@ -295,7 +303,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     }
 
     /// API to unregister a thread from the thread registry.
-    void registerThreadEnd() {
+    void endThread() {
         synchronized(sidekickLock) {
             Thread thread = Thread.currentThread();
             ThreadRegister register = threadRegistry.get(thread);
@@ -306,6 +314,15 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
                 threadRegistry.remove(thread);
             }
         }
+    }
+
+    /// Private API to set the capture's file name.
+    void setCaptureName(String name) {
+        // Verify that the name ends in ".sidekick":
+        if (!name.endsWith(".sidekick")) {
+            name += ".sidekick";
+        }
+        captureName = name;
     }
 
     /// Update the persisted property state.
@@ -380,9 +397,9 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
             try {
                 instance.server.start();
             } catch (IOException e) {
-                // @@@ I hit this error after a spontaneous connection loss. FTC Dashboard's
+                // I hit this error after a spontaneous connection loss. FTC Dashboard's
                 // connection worked, but not Sidekick's websocket connection, as a result of
-                // this problem. Should retry multiple times? I didn't see the error message, though...
+                // this problem. Should retry multiple times? Need more data.
                 logE("Couldn't start server, exception: " + e.getMessage());
             }
 
@@ -403,9 +420,9 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     }
 
     /// Register a special opMode to provide a UI means of enabling or disabling Sidekick on
-    /// the next boot. This is the third method the system calls, after onCreateEventLoop.
+    /// the next boot. This is the third notification method that the system calls on boot,
+    /// after onCreateEventLoop.
     @OpModeRegistrar @SuppressWarnings("unused") public static void registerOpMode(OpModeManager manager) {
-        logI("@@@ registerOpMode");
         // Don't enable the UI if the user has already called enable() or disable():
         if (apiRequestedState != ApiRequestedState.NOT_CALLED)
             return; // ====>
@@ -425,7 +442,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
                         String disabled = "<span style='background: #823232'>disabled</span>";
                         String currentState = isEnabled ? enabled : disabled;
                         String nextState = nextBootEnabled ? enabled : disabled;
-                        String toggleState = nextBootEnabled ? disabled : enabled;
+                        String toggleState = nextBootEnabled ? "disabled" : "enabled";
 
                         String message = "<h2>Sidekick Setting</h2>" + "Sidekick is currently " +
                             currentState;
@@ -466,12 +483,6 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
 
     /// One-time initialization we do in preparation for the first opMode.
     void oneTimeOpModeInitialization() {
-        // Register a handler to caught unhandled exceptions:
-        Thread.UncaughtExceptionHandler previous =
-                Thread.getDefaultUncaughtExceptionHandler();
-
-        logI("Previous unhandled handler: %s", previous != null ? previous.getClass().getName() : "null"); // @@@
-
         // Register a gamepad callback so that the system notifies us of gamepad updates.
         // Do this only on the first OpMode, not subsequent ones.
         NetworkConnectionHandler connectionHandler = NetworkConnectionHandler.getInstance();
@@ -511,13 +522,10 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
                 });
     }
 
-    /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the user may have just pressed
+    /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the user likely just pressed
     /// Init on their chosen opMode.
     @Override public void onOpModePreInit(OpMode opMode) {
         assert(isEnabled);
-        String className = opMode.getClass().getName();
-        logI("@@@ onOpModePreInit %s from thread %s", className, Thread.currentThread().getName());
-
         synchronized(sidekickLock) {
             if (expectedNotification != OpModeNotification.PRE_INIT) {
                 logE("onOpModePreInit() called when expecting %s", expectedNotification);
@@ -525,33 +533,31 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
             }
             expectedNotification = OpModeNotification.PRE_START; // Next expected notification
 
-            // Let the SampleWorker thread know when any new opMode (including default) has started:
-            opModeCount++;
-
             // Ignore notifications about the default opMode:
             isDefaultOpMode = (opMode instanceof OpModeManagerImpl.DefaultOpMode);
-            if (isDefaultOpMode) {
-                return; // ====>
+            if (!isDefaultOpMode) {
+                // Increment the run number and save the updated properties:
+                lastRunNumber++;
+                updateProperties();
+
+                // Now do some deferred one-time initialization when starting the first opMode:
+                if (!oneTimeOpModeInitializationDone) {
+                    oneTimeOpModeInitialization();
+                }
+                oneTimeOpModeInitializationDone = true;
+
+                // Before wrapping any objects, ensure that priming is complete:
+                try {
+                    primingDoneSignal.await();
+                } catch (InterruptedException ignored) {}
+
+                // Initialize the capture:
+                Capture.instance = new Capture(instance, opMode);
+                Capture.instance.initializeCapture(eventLoop.getOpModeManager(), isGamepadHooked);
             }
 
-            // Increment the run number and save the updated properties:
-            lastRunNumber++;
-            updateProperties();
-
-            // Now do some deferred one-time initialization when starting the first opMode:
-            if (!oneTimeOpModeInitializationDone) {
-                oneTimeOpModeInitialization();
-            }
-            oneTimeOpModeInitializationDone = true;
-
-            // Before wrapping any objects, ensure that priming is complete:
-            try {
-                primingDoneSignal.await();
-            } catch (InterruptedException ignored) {}
-
-            // Initialize the capture:
-            Capture.instance = new Capture(instance, opMode);
-            Capture.instance.initializeCapture(eventLoop.getOpModeManager(), isGamepadHooked);
+            // Now that the new opMode is fully prepared, we can notify the worker thread:
+            opModeCount++;
         }
     }
 
@@ -559,10 +565,8 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// Start on the active opMode.
     @Override public void onOpModePreStart(OpMode opMode) {
         assert(isEnabled);
-        logI("@@@ onOpModePreStart from thread %s", Thread.currentThread().getName());
         synchronized(sidekickLock) {
             if (expectedNotification != OpModeNotification.PRE_START) {
-                logE("@@@ onOpModePreStart() called when expected %s", expectedNotification);
                 return; // ====>
             }
             expectedNotification = OpModeNotification.POST_STOP; // Next expected notification
@@ -574,7 +578,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         }
     }
 
-    /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the opMode is done, perhaps
+    /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the opMode is done, likely
     /// because the user has pressed Stop.
     @Override public void onOpModePostStop(OpMode opMode) {
         assert(isEnabled);

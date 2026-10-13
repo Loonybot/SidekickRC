@@ -61,7 +61,6 @@ public class ProxyBuilder {
                         ElementMatchers.isPublic()
                                 .and(ElementMatchers.not(ElementMatchers.isConstructor()))
                                 .and(ElementMatchers.not(ElementMatchers.isDeclaredBy(Object.class)))
-//                                .and(ElementMatchers.not(ElementMatchers.isDeclaredBy(HardwareDevice.class)))
                                 .and(ElementMatchers.not(ElementMatchers.named("unwrap")))
                 )
                 .intercept(MethodDelegation.to(new Interceptor(originalClass)))
@@ -69,6 +68,7 @@ public class ProxyBuilder {
             return unloaded.load(getClass().getClassLoader(), classLoadingStrategy)
                     .getLoaded();
         } catch (Exception e) {
+            Sidekick.logE("ByteBuddy failed to proxy: " + e);
             return originalClass;
         } finally {
             double durationMs = (System.nanoTime() - startTime) / 1e6;

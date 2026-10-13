@@ -3,9 +3,9 @@ buildscript {
         google()
         mavenCentral()
     }
-    dependencies {
-        classpath "com.android.tools.build:gradle:8.7.0"
-    }
+   dependencies {
+       classpath "com.android.tools.build:gradle:8.7.0"
+   }
 }
 
 apply plugin: "com.android.library"
@@ -18,15 +18,14 @@ android {
         buildConfig = true
     }
 
-
-    compileSdkVersion 28
+    compileSdkVersion 30
 
     def libVersion = System.getenv("VERSION") ?: "0.0.0"
 
     defaultConfig {
         minSdkVersion 24
         //noinspection ExpiredTargetSdkVersion
-        targetSdkVersion 26
+        targetSdkVersion 28
 
         buildConfigField "String", "LIBRARY_VERSION", "\"${libVersion}\""
     }
@@ -52,7 +51,7 @@ dependencies {
     api "org.firstinspires.ftc:Blocks:11.0.0"
 
     implementation "androidx.annotation:annotation:1.1.0"
-    implementation "net.bytebuddy:byte-buddy-android:1.15.10"
+    implementation "net.bytebuddy:byte-buddy-android:1.18.14"
     implementation "org.objenesis:objenesis:3.2"
     implementation("org.nanohttpd:nanohttpd-websocket:2.3.1") {
         exclude module: "nanohttpd"

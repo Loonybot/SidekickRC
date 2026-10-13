@@ -76,7 +76,7 @@ class LimelightVideo {
 
     /// The Limelight capture thread's entry point.
     void capture() {
-        Sidekick.instance.registerThreadStart(Sidekick.VIDEO_CAPTURE_THREAD_NAME);
+        Sidekick.instance.beginThread(Sidekick.VIDEO_CAPTURE_THREAD_NAME);
 
         RandomAccessFile file = null;
         FileChannel channel = null;
@@ -239,7 +239,7 @@ class LimelightVideo {
             if (file != null) { try { file.close(); } catch (IOException ignored) {} }
         } finally {
             doneLatch.countDown();
-            Sidekick.instance.registerThreadEnd();
+            Sidekick.instance.endThread();
         }
     }
 

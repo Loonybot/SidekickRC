@@ -72,6 +72,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryImpl;
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryInternal;
 import org.firstinspires.ftc.robotcore.internal.system.AppUtil;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -82,7 +83,9 @@ import java.io.RandomAccessFile;
 import java.io.StringWriter;
 import java.lang.annotation.Annotation;
 import java.lang.annotation.Repeatable;
+import java.lang.reflect.Array;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.net.InetAddress;
@@ -205,6 +208,7 @@ class Signature {
     static final int DEVICE_DESCRIPTORS     = 0x9B3A4F5E;
     static final int THREAD_DESCRIPTORS     = 0x1A2B3C4D;
     static final int SERIALIZER_DESCRIPTORS = 0x4D3C2B1A;
+    static final int COUNTER_DESCRIPTORS    = 0xDEADBEEF;
     static final int CONFIGURATION          = 0xC0FFEE00;
 }
 
@@ -212,17 +216,17 @@ class Signature {
 /// encoded. A parameter can have multiple types associated with it, as with ARRAY_PREFIX
 /// and BEGIN_OBJECT/END_OBJECT which are compound formats.
 class ParamType {
-    static final byte VOID = 0; // For return values only
-    static final byte ARRAY_PREFIX = 1; // Prefix denoting an array; the array type immediately follows
-    static final byte BEGIN_OBJECT = 2; // Begin bracket for a serialized object; the serializer index immediately follows
-    static final byte END_OBJECT = 3; // End bracket for serialized objects
-    static final byte TO_STRING = 4; // For unrecognized types, use toString()
-    static final byte STRING = 5; // Inline string
-    static final byte STRING_NO_QUOTES = 6; // Inline string without quotes
-    static final byte INTEGER = 7; // Signed 32-bit integer
-    static final byte FLOAT = 8; // 32-bit float
-    static final byte BOOLEAN = 9; // 1 byte for booleans
-    static final byte ENUM = 10; // Tokenized string
+    static final byte VOID = 'v'; // For return values only
+    static final byte ARRAY_PREFIX = 'a'; // Prefix denoting an array; the array type immediately follows
+    static final byte BEGIN_OBJECT = '<'; // Begin bracket for a serialized object; the serializer index immediately follows
+    static final byte END_OBJECT = '>'; // End bracket for serialized objects
+    static final byte OBJECT_TO_STRING = 't'; // For unrecognized object types, use toString()
+    static final byte STRING = 's'; // Inline string
+    static final byte STRING_NO_QUOTES = 'S'; // Inline string without quotes
+    static final byte INTEGER = 'i'; // Signed 32-bit integer
+    static final byte FLOAT = 'f'; // 32-bit float
+    static final byte BOOLEAN = 'b'; // 1 byte for booleans
+    static final byte ENUM = 'e'; // Tokenized enum string
 }
 
 /// IDs of reserved archive record types.
@@ -259,7 +263,7 @@ class RecordId {
     static final int PAINT                                 = 31;
     static final int NOTE_STRING                           = 32;
     static final int LOOP                                  = 33;
-    static final int SYSTEM_SAMPLES                        = 34;
+    static final int COUNTERS                              = 34;
     static final int MODULE0_BULK_DATA                     = 35;
     static final int MODULE1_BULK_DATA                     = 36;
     static final int MODULE2_BULK_DATA                     = 37;
@@ -318,6 +322,18 @@ enum BusType {
     OTHER // Can be presumed to be an ethernet device
 }
 
+/// Information about the Lynx module, for storing in the manifest.
+class LynxJson {
+    String name; // Name of the Lynx module
+    int address; // Port address, for correlating to the configuration JSON
+    String firmwareVersionString; // Firmware version string
+    public LynxJson(String name, int address, String firmwareVersionString) {
+        this.name = name;
+        this.address = address;
+        this.firmwareVersionString = firmwareVersionString;
+    }
+}
+
 /// The manifest contains metadata describing the state of the capture and is saved in
 /// JSON format in the capture file.
 @SuppressWarnings({"unused"})
@@ -331,7 +347,7 @@ class ManifestJson {
     public boolean isBlocksOpMode = false; // True if recorded from BlocksOpMode
     public boolean isLinearOpMode = false; // True if LinearOpMode was used
     public int[] suppressedIssues = new int[0]; // Array of issue codes to disable
-    public int[] lynxAddresses; // Lynx port addresses, indexed by LynxModuleInfo.id
+    public LynxJson[] lynxes; // Lynx module information, indexed by LynxModuleInfo.id
     public int pinpointDeviceVersion = 0; // GoBilda Pinpoint device version; 0 if not present
     public long initUnixTimeMs = 0; // Unix time when Init was pressed, in milliseconds
     public long initNanoTime = 0; // Nano time when Init was pressed
@@ -342,6 +358,8 @@ class ManifestJson {
     public String appBuildTime = ""; // "2026-02-04T19:00:19.296-0800"
     public boolean[] gamepadIsPs4 = new boolean[2]; // False if gamepad is Xbox-compatible, true if PS4
     public boolean isExcessive = false; // True if the accumulated capture size was truncated
+    public long freeStorageSpace = 0; // Free space on the SD card, in bytes
+    public String[] limelightPipelines = new String[10]; // Limelight pipeline descriptors
 }
 
 /// Structure to describe a captured thread.
@@ -365,27 +383,28 @@ class ThreadDescriptor {
     }
 }
 
-/// We accumulate one instance of this class for every Lynx module used.
-class LynxModuleInfo {
+/// We accumulate one instance of this class for every Lynx module used. Used to track its state.
+class LynxModuleState {
     final Object bulkCachingLock; // Lynx module's lock for bulk caching
-    LynxModule module;
+    LynxModule.BulkData lastBulkData; // Most recent bulk data
+    LynxModule module; // SDK object
     int id;
-    LynxModule.BulkData lastBulkData;
 
-    LynxModuleInfo(@NonNull Object bulkCachingLock) {
+    LynxModuleState(@NonNull Object bulkCachingLock) {
         this.bulkCachingLock = bulkCachingLock;
     }
 }
 
 /// One instance of this class is kept for every unique [HardwareDevice] class used and tracks
 /// the wrapping data for serialization.
-class DeviceInfo {
+class DeviceClassInfo {
     int deviceId; /// Unique ID for this device class; index into [Capture#deviceClassArray]
     int maxInstances; // Maximum count of devices expected to use this class
-    BusType busType; // Bus type for this device
+    BusType busType; // Bus type for this device class
     Class<?> originalClass; // Original device class type
     List<String> deviceNames = new LinkedList<>(); // Names of instances of this class; index by instance ID
     List<HardwareDevice> proxyInstances = new LinkedList<>(); // Proxy instances for this class; index by instance ID
+    HashMap<Method, Capture.DynamicDescriptor> descriptorMap = new HashMap<>(); // Dynamic method descriptors
     boolean isBulkReader; // True if this device is on a Lynx module that supports bulk reads
     boolean isPinpoint; /// True if the associated driver is [GoBildaPinpointDriver]
     boolean isLimelight; /// True if the associated driver is [Limelight3A]
@@ -404,7 +423,7 @@ class DeviceChild {
 }
 
 /// Principal class responsible for creating the capture.
-@SuppressWarnings({"unchecked", "rawtypes", "ReassignedVariable", "ResultOfMethodCallIgnored"}) // Can add "unused"
+@SuppressWarnings({"ReassignedVariable", "ResultOfMethodCallIgnored"})
 class Capture {
     /// Track state for the beginNoMovement/endNoMovement() APIs.
     static class NoMovement {
@@ -431,15 +450,15 @@ class Capture {
     /// [Capture#putFloatObject] et al.
     class DynamicDescriptor {
         String methodName; // Name of the method, empty for data record descriptors
-        int deviceId; /// IDs the associated device, index into index into [Capture#deviceClassArray], not used for data record descriptors
+        int deviceId; /// IDs the associated device, index into [Capture#deviceClassArray], not used for data record descriptors
         int childId; // If non-zero, this is a child class of the associated type
         int maxInstances; // Maximum number of instances associated with this record
         int recordLength; // Length, in bytes, of the arguments for each SDK call
-        Consumer[] paramPutters; // Consumers for serializing every argument
-        Consumer resultPutter; // Consumer for serializing the return value
+        List<Consumer<Object>> paramPutters; // Consumers for serializing every argument
+        Consumer<Object> resultPutter; // Consumer for serializing the return value
         int interceptorFlags; /// Flags indicating special handling by interceptor [Interceptor.Flags]
         int wrapId; // If the method returns a child, wrap it with this ID
-        LynxModuleInfo lynxInfo; // If a Lynx bulk reader, this is the associated information
+        LynxModuleState lynxState; // If a Lynx bulk reader, this is the associated state
 
         int recordId; /// Base 16-bit identifier of this record type ([RecordId] for fixed definition records)
         byte[] formatBuffer; /// Array of [ParamType]; the formats of the arguments (and return value, if present)
@@ -456,13 +475,13 @@ class Capture {
                 majorError("Device ID overflow");
             }
 
-            // Remember the representation of all of the argument types:
+            // Remember the representation of all the argument types:
             formatBuffer = schemaKey.format;
 
             // Create a 'putter' for every argument from the 'formatBuffer':
-            paramPutters = new Consumer[argCount];
+            paramPutters = new ArrayList<>(argCount);
             for (int i = 0; i < argCount; i++) {
-                paramPutters[i] = nextParamPutter(); // Updates recordLength and formatIndex
+                paramPutters.add(nextParamPutter()); // Updates recordLength and formatIndex
             }
 
             // Cache the resulting descriptor:
@@ -471,12 +490,12 @@ class Capture {
         }
 
         /// Constructor for hand-coded wrappers.
-        DynamicDescriptor(DeviceInfo deviceInfo, String method, SchemaKey schemaKey) {
-            deviceId = deviceInfo.deviceId;
-            maxInstances = deviceInfo.maxInstances;
+        DynamicDescriptor(DeviceClassInfo classInfo, String method, SchemaKey schemaKey) {
+            deviceId = classInfo.deviceId;
+            maxInstances = classInfo.maxInstances;
             methodName = method;
             recordId = nextDynamicId;
-            nextDynamicId += deviceInfo.maxInstances;
+            nextDynamicId += classInfo.maxInstances;
             if (recordId > (RecordId.LAST_DYNAMIC + 1)) {
                 majorError("Device ID overflow");
             }
@@ -486,42 +505,41 @@ class Capture {
         }
 
         /// Constructor for device calls wrapped via Byte Buddy.
-        DynamicDescriptor(Interceptor.Context context, Interceptor.MethodKey methodKey) {
-            DeviceInfo deviceInfo = context.deviceInfo;
-            deviceId = deviceInfo.deviceId;
-            maxInstances = deviceInfo.maxInstances;
+        DynamicDescriptor(Interceptor.Context context, Method method) {
+            DeviceClassInfo classInfo = context.classInfo;
+            deviceId = classInfo.deviceId;
+            maxInstances = classInfo.maxInstances;
             childId = context.childId;
-            methodName = methodKey.method.getName();
+            methodName = method.getName();
             recordId = nextDynamicId;
-            nextDynamicId += deviceInfo.maxInstances;
+            nextDynamicId += classInfo.maxInstances;
             if (recordId > (RecordId.LAST_DYNAMIC + 1)) {
                 majorError("Device ID overflow");
             }
 
             // Combine the argument and return types into a single array of parameter types:
-            Class[] parameterTypes = methodKey.method.getParameterTypes();
+            Class<?>[] parameterTypes = method.getParameterTypes();
             int parameterCount = parameterTypes.length;
-            Class[] allParameters = Arrays.copyOf(parameterTypes, parameterCount + 1);
-            allParameters[parameterCount] = methodKey.method.getReturnType();
+            Class<?>[] allParameters = Arrays.copyOf(parameterTypes, parameterCount + 1);
+            allParameters[parameterCount] = method.getReturnType();
 
-            // Encode a representation of all of the argument types:
+            // Encode a representation of all the argument types:
             SchemaKey argsKey = getSchemaKey(allParameters, true, 0);
             formatBuffer = argsKey.format;
 
             // Create a 'putter' for every argument plus the return value from the 'formatBuffer':
-            paramPutters = new Consumer[parameterCount];
+            paramPutters = new ArrayList<>(parameterCount);
             for (int i = 0; i < parameterCount; i++) {
-                paramPutters[i] = nextParamPutter(); // Updates recordLength and formatIndex
+                paramPutters.add(nextParamPutter()); // Updates recordLength and formatIndex
             }
             resultPutter = nextParamPutter();
 
-            // Cache the resulting descriptor:
-            methodDescriptors.put(methodKey, this);
+            // Store the resulting descriptor:
             allocatedDescriptors.add(this);
 
-            if ((context.deviceInfo.isBulkReader) && (BULK_READER_METHODS.contains(methodName))) {
+            if ((context.classInfo.isBulkReader) && (BULK_READER_METHODS.contains(methodName))) {
                 prepareForLynxBulkReads(context);
-            } else if (context.deviceInfo.isPinpoint) {
+            } else if (context.classInfo.isPinpoint) {
                 if (methodName.equals("setBulkReadScope")) {
                     pinpointSetBulkReadScope = true;
                 }
@@ -534,15 +552,13 @@ class Capture {
                         interceptorFlags |= Interceptor.Flags.PINPOINT_STATUS_UPDATE;
                     }
                 }
-            } else if ((context.deviceInfo.isLimelight) && (methodName.equals("getLatestResult"))) {
-                    interceptorFlags |= Interceptor.Flags.LIMELIGHT_STATUS_UPDATE;
             }
             for (int i = 1; i < DEVICE_CHILDREN.length; i++) { // Index of zero is reserved
                 DeviceChild deviceChild = DEVICE_CHILDREN[i];
                 // If the object is of the specified device class, and if the method returns the
                 // specified derivative class, then wrap the result:
                 if ((deviceChild.deviceClass.isAssignableFrom(context.originalObject.getClass())) &&
-                    (deviceChild.childClass.isAssignableFrom(methodKey.method.getReturnType()))) {
+                    (deviceChild.childClass.isAssignableFrom(method.getReturnType()))) {
                     interceptorFlags |= Interceptor.Flags.WRAP_CHILD;
                     wrapId = i;
                     break;
@@ -596,31 +612,30 @@ class Capture {
                 return; // ====>
             }
 
-            lynxInfo = lynxModuleMap.get(lynxModule);
-            if (lynxInfo != null) { // The error is already marked if 'lynxModuleMap' is incomplete
+            lynxState = lynxModuleMap.get(lynxModule);
+            if (lynxState != null) { // The error is already marked if 'lynxModuleMap' is incomplete
                 interceptorFlags |= Interceptor.Flags.LYNX_BULK_READ;
             }
         }
 
-        /// This is another argument consumer similar to [Capture#putIntegerObject], et al, except
+        /// This is another argument consumer similar to [Capture#putIntegerObject], et al., except
         /// that it comes bundled with additional state to handle the complexity of serializing an
         /// array.
         class ArrayPutter {
             static final int MAX_ARRAY_SIZE = 250; // The count fits into an unsigned byte
 
-            Consumer paramPutter; // 'putter' for the type of the array's elements
+            Consumer<Object> paramPutter; // 'putter' for the type of the array's elements
             int argSize; // The byte size of an element of the array
 
             // Take a 'putter' for the array's elements.
-            ArrayPutter(Consumer paramPutter, int argSize) {
+            ArrayPutter(Consumer<Object> paramPutter, int argSize) {
                 this.paramPutter = paramPutter;
                 this.argSize = argSize;
             }
 
             // Serialize an array by writing its size and then putting each element.
-            void putArray(Object arg) {
-                Object[] array = (Object[]) arg;
-                int count = Math.min(array.length, MAX_ARRAY_SIZE);
+            void putArray(Object array) {
+                int count = Math.min(Array.getLength(array), MAX_ARRAY_SIZE);
                 chunk.put((byte) count); // This doesn't need to check chunkRemaining; already done
                 for (int i = 0; i < count; i++) {
                     // To reduce fragmentation and also avoid the problem of count * argSize >
@@ -628,25 +643,25 @@ class Capture {
                     if ((chunkRemaining -= argSize) < 0) {
                         nextChunk();
                     }
-                    paramPutter.accept(array[i]);
+                    paramPutter.accept(Array.get(array, i));
                 }
             }
         }
 
-        /// This is another argument consumer similar to [Capture#putIntegerObject], et al, except
+        /// This is another argument consumer similar to [Capture#putIntegerObject], et al., except
         /// that it comes bundled with additional state to handle the complexity of serializing a
         /// class object.
         class ObjectPutter {
-            final Sidekick.SerializerInfo serializerInfo;
-            final Consumer[] putters;
+            final Sidekick.SerializerInfo<?> serializerInfo;
+            final List<Consumer<Object>> putters;
 
             /// Create the putters for the fields of an object.
-            ObjectPutter(Sidekick.SerializerInfo serializerInfo) {
+            ObjectPutter(Sidekick.SerializerInfo<?> serializerInfo) {
                 int argCount = serializerInfo.prototypeOutput.length;
                 this.serializerInfo = serializerInfo;
-                this.putters = new Consumer[argCount];
+                this.putters = new ArrayList<>(argCount);
                 for (int i = 0; i < argCount; i++) {
-                    putters[i] = nextParamPutter();
+                    putters.add(nextParamPutter());
                 }
             }
 
@@ -663,35 +678,35 @@ class Capture {
                     values = serializerInfo.prototypeOutput; // Fake values
                 } else {
                     isNonNull = 1;
-                    values = serializerInfo.serializer.serialize(arg);
+                    values = serializerInfo.serialize(arg);
                 }
                 chunk.put(isNonNull); // One byte to indicate whether it's null or not
-                for (int i = 0; i < putters.length; i++) {
-                    putters[i].accept(values[i]);
+                for (int i = 0; i < putters.size(); i++) {
+                    putters.get(i).accept(values[i]);
                 }
             }
         }
 
         /// Adds to [DynamicDescriptor#recordLength] on every invocation.
-        Consumer nextParamPutter() {
+        Consumer<Object> nextParamPutter() {
             switch (formatBuffer[formatIndex++]) {
                 case ParamType.INTEGER: recordLength += 4; return Capture.this::putIntegerObject;
                 case ParamType.FLOAT: recordLength += 4; return Capture.this::putFloatObject;
                 case ParamType.BOOLEAN: recordLength += 1; return Capture.this::putBooleanObject;
                 case ParamType.ENUM: recordLength += 2; return Capture.this::putEnumObject;
-                case ParamType.TO_STRING: return Capture.this::putToStringObject;
+                case ParamType.OBJECT_TO_STRING: return Capture.this::putToStringObject;
                 case ParamType.STRING: return Capture.this::putStringObject; // String does its own length check
                 case ParamType.STRING_NO_QUOTES: return Capture.this::putStringObject;
                 case ParamType.VOID: return Capture.this::putVoidObject;
                 case ParamType.ARRAY_PREFIX:
                     int arrayStartLength = ++recordLength; // Reserve a byte for the array size
-                    Consumer paramPutter = nextParamPutter(); // Increments recordLength
+                    Consumer<Object> paramPutter = nextParamPutter(); // Increments recordLength
                     int argLength = recordLength - arrayStartLength;
                     recordLength = arrayStartLength;
                     return new DynamicDescriptor.ArrayPutter(paramPutter, argLength)::putArray;
                 case ParamType.BEGIN_OBJECT:
                     int serializerIndex = formatBuffer[formatIndex++];
-                    Sidekick.SerializerInfo serializerInfo = sidekick.serializersList.get(serializerIndex);
+                    Sidekick.SerializerInfo<?> serializerInfo = sidekick.serializersList.get(serializerIndex);
                     assert (serializerInfo != null);
                     DynamicDescriptor.ObjectPutter objectPutter = new DynamicDescriptor.ObjectPutter(serializerInfo);
                     recordLength++; // Reserve the null-object indicator byte
@@ -703,18 +718,17 @@ class Capture {
         }
     }
 
-    /// Version numbers are 64-bit values encoded as major.minor.build:
+    /// Version numbers are 64-bit values encoded as major.minor.patch:
     @SuppressWarnings("SameParameterValue")
     static long createVersion(int major, int minor, int patch) {
         return ((long) major << 32) | ( (long) minor << 16) | patch;
     }
 
-    // Get the 64-bit library version number from the built Version file, if it exists:
+    /// Get the 64-bit library version number from the built Version file, if it exists:
     static long getLibraryVersion() {
-        // Version is built by gradle in all flavors except for the emulator:
-//        String versionString = Sidekick.getStaticField("com.loonybot.sidekick.Version",
-//                "LIBRARY_VERSION", String.class, "1.2.3");
-String versionString = BuildConfig.LIBRARY_VERSION;
+        // Version is built by Gradle in all flavors except for the emulator:
+        String versionString = Sidekick.getStaticField("com.loonybot.sidekick.BuildConfig",
+                "LIBRARY_VERSION", String.class, "1.2.3");
 
         String[] parts = versionString.split("\\.");
         int major = Integer.parseInt(parts[0]);
@@ -741,7 +755,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
 
     // Constants:
     final static boolean DEBUG = true; // Enable debug code
-    final static long OP_MODE_TIME_LIMIT_NANOS = 10*1000*1000*1000L; // 121 seconds # @@@@@@@@@@@@
+    final static long OP_MODE_TIME_LIMIT_NANOS = 121*1000*1000*1000L; // 121 seconds
     final static int TICK_SHIFT = 8; // Downshift nanoTime() by this many bits to encode time ticks
     final static int TICK_MASK = 0xffffff; // Mask to extract time ticks from nanoTime() after shift
     final static byte NULL_TERMINATOR = 0; // We null-terminate all strings in the archive
@@ -792,22 +806,22 @@ String versionString = BuildConfig.LIBRARY_VERSION;
     Section[] sections; // Data on all capture sections
     String lastLogcatTime; // Time that the last logcat was saved (null if none saved yet)
     int opModeTid; // Linux TID of the OpMode thread; zero if not yet known
+    ThreadDescriptor opModeThreadDescriptor; // Descriptor for the OpMode thread; null if not yet seen
     long currentThreadId; /// Java ID of most recent thread to write to the archive (not the
         /// Linux TID!). Zero is a reserved value that causes [#threadSwitchAndBookkeeping] to be
         /// called before the next record.
     boolean[] gamepadIsPs4 = new boolean[2]; // False if gamepad is Xbox-compatible, true if PS4
-    ArrayList<DeviceInfo> deviceClassArray = new ArrayList<>(); /// List of all device classes, index by [DeviceInfo#deviceId]
-    HashMap<Interceptor.MethodKey, DynamicDescriptor> methodDescriptors = new HashMap<>(); // Descriptor map for methods
+    ArrayList<DeviceClassInfo> deviceClassArray = new ArrayList<>(); /// List of all device classes, index by [DeviceClassInfo#deviceId]
     Map<SchemaKey, DynamicDescriptor> varargsDescriptors = new HashMap<>(); // Descriptor map for varargs
     HashMap<String, DynamicDescriptor> hardwareMapDescriptors = new HashMap<>(); /// For [#recordHardwareMapGet]
     LinkedList<DynamicDescriptor> allocatedDescriptors = new LinkedList<>(); // List of all descriptors
     HashMap<Thread, ThreadDescriptor> threadDescriptorMap = new HashMap<>(); // Map thread to descriptor
     LinkedList<ThreadDescriptor> threadDescriptorList = new LinkedList<>(); // List of all descriptors, zero is reserved
-    HashMap<LynxModule, LynxModuleInfo> lynxModuleMap = new HashMap<>(); // Not all Lynx modules may be present
+    HashMap<LynxModule, LynxModuleState> lynxModuleMap = new HashMap<>(); // Not all Lynx modules may be present
     boolean majorError; // True if an error was recorded that will prevent the capture from loading
     int processJiffyStart; // The process's jiffy count at the start of the capture
     int processJiffyDuration; // The process's total jiffy count, determined at the end of the capture
-    long wallClockJiffyStart; // The start timer for wallClockJiffyDuration, in nano seconds
+    long wallClockJiffyStart; // The start timer for wallClockJiffyDuration, in nanoseconds
     int wallClockJiffyDuration; // The wall clock's total jiffy count, in jiffies, for a single core
     Field lynxModuleLastBulkDataField; /// LynxModule.lastBulkData (type [LynxModule.BulkData])
     Field bulkDataRespField; /// LynxModule.BulkData.resp (type [LynxGetBulkInputDataResponse])
@@ -869,15 +883,22 @@ String versionString = BuildConfig.LIBRARY_VERSION;
 
     /// Register a new thread.
     ThreadDescriptor registerThread(Thread thread, String name, int tid, boolean isNew) {
-        if (name.equals("OpModeThread")) {
-            opModeTid = android.os.Process.myTid();
-        }
-
         ThreadDescriptor descriptor = new ThreadDescriptor(threadDescriptorList.size(), name,
                 thread.getPriority(), tid, isNew);
         threadDescriptorMap.put(thread, descriptor);
         threadDescriptorList.add(descriptor);
+
+        if (name.equals("OpModeThread")) {
+            opModeTid = android.os.Process.myTid();
+            opModeThreadDescriptor = descriptor;
+        }
         return descriptor;
+    }
+
+    /// Convert wall-clock nanoseconds to jiffies.
+    static int nanosToJiffies(long nanos) {
+        // Every jiffy is 10ms of wall clock time (i.e., one jiffy = 10,000,000 nanoseconds):
+        return (int)Math.round(nanos * 1e-7);
     }
 
     /// Get the current process jiffy count and add a snapshot of active Java threads. `start`
@@ -885,12 +906,12 @@ String versionString = BuildConfig.LIBRARY_VERSION;
     void snapshotThreadsAndJiffies(boolean start) {
         double startMillis = System.nanoTime() * 1e-6;
         if (start) {
-            processJiffyStart = ThreadSampler.getProcessJiffies();
+            processJiffyStart = SystemHelp.getProcessJiffies();
             wallClockJiffyStart = nanoTime();
         } else {
             // Every jiffy is 10ms of wall clock time:
-            processJiffyDuration = ThreadSampler.getProcessJiffies() - processJiffyStart;
-            wallClockJiffyDuration = (int)((nanoTime() - wallClockJiffyStart) * 1e-7);
+            processJiffyDuration = SystemHelp.getProcessJiffies() - processJiffyStart;
+            wallClockJiffyDuration = nanosToJiffies(nanoTime() - wallClockJiffyStart);
         }
 
         ThreadGroup root = Thread.currentThread().getThreadGroup();
@@ -919,13 +940,13 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             if (start) {
                 // We're at the start of the run, so record the jiffies that the thread has already
                 // consumed:
-                descriptor.jiffyStart = ThreadSampler.getThreadJiffies(descriptor.tid);
+                descriptor.jiffyStart = SystemHelp.getThreadJiffies(descriptor.tid);
             } else {
                 // We're at the end of the run and can compute the thread's duration. However,
                 // don't do it if the duration has already been computed (i.e., the thread ended):
                 if (descriptor.jiffyDuration == -1) {
                     // Calculate the duration when both the start and end jiffies are known:
-                    int jiffies = ThreadSampler.getThreadJiffies(descriptor.tid);
+                    int jiffies = SystemHelp.getThreadJiffies(descriptor.tid);
                     if ((jiffies != -1) && (descriptor.jiffyStart != -1)) {
                         descriptor.jiffyDuration = jiffies - descriptor.jiffyStart;
                     }
@@ -938,8 +959,6 @@ String versionString = BuildConfig.LIBRARY_VERSION;
 
     /// Called by Sidekick to register a start/end transition of the specified thread.
     void registerThreadTransition(Thread thread, Sidekick.ThreadRegister register, boolean start) {
-        Sidekick.logI("Registering transition for thread '%s': %s", thread.getName(), start); // @@@
-
         assert(Thread.holdsLock(Sidekick.sidekickLock));
         ThreadDescriptor descriptor = threadDescriptorMap.get(thread);
         if (start) {
@@ -951,7 +970,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             if (descriptor != null) {
                 // We have to query the thread's jiffies before the thread terminates so do it now:
                 if (descriptor.jiffyStart != -1) {
-                    int jiffies = ThreadSampler.getThreadJiffies(register.tid);
+                    int jiffies = SystemHelp.getThreadJiffies(register.tid);
                     if (jiffies != -1) {
                         descriptor.jiffyDuration = jiffies - descriptor.jiffyStart;
                     }
@@ -999,7 +1018,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                     return ParamType.BEGIN_OBJECT;
                 } else {
                     // Our catch-all is to convert the parameter to a String using 'toString()'.
-                    return ParamType.TO_STRING;
+                    return ParamType.OBJECT_TO_STRING;
                 }
         }
     }
@@ -1008,11 +1027,11 @@ String versionString = BuildConfig.LIBRARY_VERSION;
      /// in a Java Map.
      ///
      /// The varargs format is an array of [ParamType] bytes; generally, it's one per argument. If a
-     /// function takes 2 float arguments with no return value, the buffer would be ["FLOAT, FLOAT"].
+     /// function takes 2 float arguments with no return value, the buffer would be \[FLOAT, FLOAT\].
      /// If it has a return value, that type gets appended to the end. The encoding for serialized
-     /// objects is more complicated so as to represent a hierarchy with object types. For example,
+     /// objects is more complicated to represent a hierarchy with object types. For example,
      /// if a function takes a Pose2D and an int as arguments, the buffer would be:
-     /// ["BEGIN_OBJECT, {Pose2D-identifier}, FLOAT, FLOAT, FLOAT, END_OBJECT, INTEGER"]
+     /// \["BEGIN_OBJECT, {Pose2D-identifier}, FLOAT, FLOAT, FLOAT, END_OBJECT, INTEGER"\]
     static class SchemaKey {
         public byte[] format; /// Array of [ParamType]
         SchemaKey(byte[] format) {
@@ -1131,7 +1150,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         return chunk.capacity() - chunk.remaining() + sidekick.fileWorker.getBytesQueued();
     }
 
-    /// Do some book keeping and record that a thread switch occurred. Return true if everything
+    /// Do some bookkeeping and record that a thread switch occurred. Return true if everything
     /// is good; false if we are no longer recording and the caller should abort.
     @SuppressWarnings("BooleanMethodIsAlwaysInverted")
     boolean threadSwitchAndBookkeeping() {
@@ -1219,7 +1238,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         assert(Thread.holdsLock(sidekickLock));
         if (Thread.currentThread().getId() != currentThreadId) {
             if (!threadSwitchAndBookkeeping())
-                return false; // ====> Don't record any more
+                return false; // ====> Don't record anymore
         }
         if ((chunkRemaining -= (5 + payloadByteCount)) < 0) {
             nextChunk();
@@ -1280,7 +1299,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             chunkRemaining -= bytesWritten;
 
             /// We fudge the [totalBytesWritten] comparison value because we might otherwise get
-            /// within 1 byte of the end but be unable to add a multi-byte character - which would
+            /// within 1 byte of the end but be unable to add a multibyte character - which would
             /// cause us to loop endlessly:
             if ((totalBytesWritten >= maxByteSize - 3) || (!inBuffer.hasRemaining())) {
                 break;
@@ -1352,7 +1371,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         return (short) (int) tokenId;
     }
 
-    /// Remove all of the prefixes of the type name.
+    /// Remove all the prefixes of the type name.
     String rootName(String typeName) {
         int index = typeName.lastIndexOf('.');
         return (index == -1) ? typeName : typeName.substring(index + 1);
@@ -1360,7 +1379,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
 
     /// When serializing descriptors of hardware device objects, we want to save the name of the
     /// class as its canonical SDK name. For example, [DcMotorEx] objects are actually of type
-    /// "[DcMotorImplEx]" which is internal ugliness, so substitute "DcMotorEx" instead..
+    /// "[DcMotorImplEx]" which is internal ugliness, so substitute "DcMotorEx" instead.
     String getSdkName(Class<?> klass) {
         // First, search through 'allDeviceMappings' for a matching type:
         for (HardwareMap.DeviceMapping<?> deviceMapping: hardwareMap.allDeviceMappings) {
@@ -1390,15 +1409,18 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         minBatteryMilliVolts.getAndUpdate(v -> Math.min(v, milliVolts));
     }
 
-    /// Record a begin/end bonus bracket for the current thread. All device calls made by the
+    /// Record a beginning/end bonus bracket for the current thread. All device calls made by the
     /// current thread while in a bracket are marked as "bonus" by the app. "Bonus" means that
     /// the user didn't call them - they were automatically invoked by either Sidekick or the
     /// system.
+    ///
+    /// NOTE: This is thread safe but does not support recursion as the latter would require
+    ///       per-thread tracking given that this releases sidekickLock.
     void markBonus(boolean begin) {
         synchronized(sidekickLock) {
             if (Thread.currentThread().getId() != currentThreadId) {
                 if (!threadSwitchAndBookkeeping())
-                    return; // ====> Don't record any more
+                    return; // ====> Don't record anymore
             }
             if ((chunkRemaining -= 2) < 0) {
                 nextChunk();
@@ -1408,18 +1430,43 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         }
     }
 
-    /// Record performance samples.
-    void recordSamples(CpuSampler.Record cpuRecord, BandwidthSampler.Record storageRecord, MemoryAndThreadCountSampler.Record memoryRecord, SidekickSampler.Record sidekickRecord, short acquisitionTime) {
-        synchronized(sidekickLock) {
-            if (beginRecord(RecordId.SYSTEM_SAMPLES, CpuSampler.Record.PUT_SIZE + BandwidthSampler.Record.PUT_SIZE + MemoryAndThreadCountSampler.Record.PUT_SIZE + SidekickSampler.Record.PUT_SIZE + 2)) {
-                cpuRecord.put(chunk);
-                storageRecord.put(chunk);
-                memoryRecord.put(chunk);
-                sidekickRecord.put(chunk);
-                chunk.putShort(acquisitionTime);
-                assertChunk();
+    /// Record counter values.
+    void recordCounterValues(List<CounterValue> counters) {
+        int counterCount = counters.size();
+        if (counterCount != 0) {
+            synchronized (sidekickLock) {
+                if (beginRecord(RecordId.COUNTERS, 2 + 6 * counterCount)) {
+                    chunk.putShort((short) counterCount);
+                    for (CounterValue counter : counters) {
+                        chunk.putShort((short) counter.index);
+                        chunk.putFloat((float) counter.value);
+                    }
+                    assertChunk();
+                }
             }
         }
+    }
+
+    /// Record and return the current values of the given counters.
+    Double[] getCounters(String[] ids) {
+        // Collect the counter values without holding a lock:
+        List<CounterValue> values = Counters.instance.collectSet(ids);
+
+        // Record all values into the capture:
+        recordCounterValues(values);
+
+        // Prepare the result, remembering that collectSet() may have returned more values than we
+        // needed, and that some IDs may have been invalid:
+        Double[] result = new Double[ids.length];
+        for (int i = 0; i < ids.length; i++) {
+            for (int j = 0; j < values.size(); j++) {
+                if (values.get(j).id.equals(ids[i])) {
+                    result[i] = values.get(j).value;
+                    break;
+                }
+            }
+        }
+        return result;
     }
 
     /// Record that [HardwareMap#get] (or a permutation) was called. Produces records that get
@@ -1429,15 +1476,15 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             DynamicDescriptor dynamicDescriptor = hardwareMapDescriptors.get(methodName);
             if (dynamicDescriptor == null) {
                 // We are recording a HardwareMap method so that's the type we specify here:
-                DeviceInfo deviceInfo = hardwareMap.getDeviceInfo(HardwareMap.class);
-                if (deviceInfo.deviceNames.isEmpty()) {
-                    deviceInfo.deviceNames.add("HardwareMap");
+                DeviceClassInfo classInfo = hardwareMap.registerDeviceClassInfo(HardwareMap.class);
+                if (classInfo.deviceNames.isEmpty()) {
+                    classInfo.deviceNames.add("HardwareMap");
                     // Nothing added to 'proxyInstance' because HardwareMap.get() will never be called
                 }
                 // The 1st argument is a string that won't be shown with quotes, the 2nd argument
-                // is a strong to be shown with quotes, and the return type is 'void':
+                // is a string to be shown with quotes, and the return type is 'void':
                 SchemaKey schemaKey = new SchemaKey(new byte[]{ParamType.STRING_NO_QUOTES, ParamType.STRING, ParamType.VOID});
-                dynamicDescriptor = new DynamicDescriptor(deviceInfo, methodName, schemaKey);
+                dynamicDescriptor = new DynamicDescriptor(classInfo, methodName, schemaKey);
                 hardwareMapDescriptors.put(methodName, dynamicDescriptor);
             }
             // There's only one HardwareMap so we don't need to specify an instance:
@@ -1463,7 +1510,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
 
             /// Do work to register the [DynamicDescriptor] and allow [SkHardwareMap#wrapDevice] to
             /// return this device:
-            DeviceInfo deviceInfo = hardwareMap.getDeviceInfo(originalSensor.getClass());
+            DeviceClassInfo deviceInfo = hardwareMap.registerDeviceClassInfo(originalSensor.getClass());
             int instance = deviceInfo.deviceNames.size();
             deviceInfo.deviceNames.add(sensorName);
             deviceInfo.proxyInstances.add(this); // Allow HardwareMap.get() to be called
@@ -1508,22 +1555,22 @@ String versionString = BuildConfig.LIBRARY_VERSION;
     }
 
     /// Record Lynx bulk data when a 'get' method is called that generates new bulk data.
-    void recordLynxBulkRead(Capture capture, LynxModuleInfo lynxInfo) {
+    void recordLynxBulkRead(Capture capture, LynxModuleState lynxState) {
         synchronized (sidekickLock) {
-            synchronized (lynxInfo.bulkCachingLock) {
+            synchronized (lynxState.bulkCachingLock) {
                 LynxModule.BulkData lastBulkData;
                 LynxGetBulkInputDataResponse bulkResponse;
 
-                try { // lastBulkData = lynxInfo.module.lastBulkData:
-                    lastBulkData = (LynxModule.BulkData) capture.lynxModuleLastBulkDataField.get(lynxInfo.module);
+                try { // lastBulkData = lynxState.module.lastBulkData:
+                    lastBulkData = (LynxModule.BulkData) capture.lynxModuleLastBulkDataField.get(lynxState.module);
                 } catch (IllegalAccessException e) {
                     minorError("Bulk read Lynx module");
                     return; // ====>
                 }
 
                 // If the bulk data has changed, record it:
-                if ((lastBulkData != null) && (lastBulkData != lynxInfo.lastBulkData)) {
-                    lynxInfo.lastBulkData = lastBulkData;
+                if ((lastBulkData != null) && (lastBulkData != lynxState.lastBulkData)) {
+                    lynxState.lastBulkData = lastBulkData;
 
                     try { // bulkResponse = lastBulkData.resp:
                         bulkResponse = (LynxGetBulkInputDataResponse) capture.bulkDataRespField.get(lastBulkData);
@@ -1534,7 +1581,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
 
                     // Obtain the bulk payload data from 'resp' and record it:
                     if (bulkResponse != null) {
-                        int lynxIndex = lynxInfo.id;
+                        int lynxIndex = lynxState.id;
                         byte[] currentPayload = bulkResponse.toPayloadByteArray();
 
                         // Bulk data is 34 bytes. To save space, we delta-encode from the previous results. We
@@ -1581,7 +1628,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
     }
 
     /// Record bonus data when [GoBildaPinpointDriver#update] is called.
-    void recordPinpointUpdate(GoBildaPinpointDriver wrappedPinpoint, int interceptorFlags) {
+    void recordPinpointUpdate(GoBildaPinpointDriver wrappedPinpoint, int instanceId, int interceptorFlags) {
         if ((pinpointSetBulkReadScope) || ((interceptorFlags & Interceptor.Flags.PINPOINT_STATUS_UPDATE) != 0)) {
             // If the register scope has been set, don't record bulk data, only the status, as
             // they will presumably use all the registers they've set and so there won't be
@@ -1593,11 +1640,12 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             synchronized(sidekickLock) {
                 // The user hasn't set the register scope, so record all the data that
                 // 'update()' provides:
-                if (beginRecord(RecordId.PINPOINT_BULK_DATA, 38)) {
+                if (beginRecord(RecordId.PINPOINT_BULK_DATA, 39)) {
                     // Unwrap the Pinpoint object to avoid recording each individual 'get' call; we're
-                    // batching the results together into one record here for better efficiency:
+                    // batching the results together into one record here for better efficiency.
                     GoBildaPinpointDriver unwrapped = unwrap(wrappedPinpoint);
                     long startTime = nanoTime();
+                    chunk.put((byte) instanceId); // If more than one pinpoint is present, this IDs it
                     putEnumObject(unwrapped.getDeviceStatus());
                     chunk.putInt(unwrapped.getEncoderX());
                     chunk.putInt(unwrapped.getEncoderY());
@@ -1675,7 +1723,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
     }
 
     /// Serialize the serializers.
-    void serializeSerializers() {
+    void serializeSerializerDescriptors() {
         if ((chunkRemaining -= 6) < 0)
             nextChunk();
         chunk.putInt(Signature.SERIALIZER_DESCRIPTORS);
@@ -1687,7 +1735,24 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         assertChunk();
     }
 
-    /// Save all of the dynamic record descriptors into chunks.
+    /// Serialize system counter descriptors.
+    void serializeCounterDescriptors() {
+        if ((chunkRemaining -= 6) < 0)
+            nextChunk();
+        chunk.putInt(Signature.COUNTER_DESCRIPTORS);
+        chunk.putShort((short) sidekick.counters.size());
+        for (CounterDescriptor counter : sidekick.counters) {
+            if ((chunkRemaining -= 1) < 0) {
+                nextChunk();
+            }
+            putString(counter.id);
+            putString(counter.unit);
+            chunk.put((byte) (counter.isInteger ? 1 : 0));
+        }
+        assertChunk();
+    }
+
+    /// Save all the dynamic record descriptors into chunks.
     void serializeDynamicDescriptors() {
         // The first bytes of the section are for the signature and count of records:
         if ((chunkRemaining -= 6) < 0)
@@ -1728,7 +1793,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         }
     }
 
-    /// Save all of the device descriptors into chunks.
+    /// Save all the device descriptors into chunks.
     void serializeDeviceDescriptors() {
         // The first bytes of the section are for the signature and count of records:
         if ((chunkRemaining -= 6) < 0)
@@ -1737,7 +1802,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         chunk.putShort((short) deviceClassArray.size());
         assertChunk();
 
-        for (DeviceInfo classCache: deviceClassArray) {
+        for (DeviceClassInfo classCache: deviceClassArray) {
             if ((chunkRemaining -= 3) < 0) {
                 nextChunk();
             }
@@ -1805,13 +1870,12 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         }
     }
 
-    /// Serialize the robot's configuration file.
+    /// Serialize the robot's configuration file. PERF: This could be moved to boot-time.
     void serializeConfiguration() {
         String configName = Sidekick.getStaticField(
                 "org.firstinspires.ftc.robotcore.internal.webserver.RobotControllerWebInfo",
                 "cachedConfigName", String.class, null);
         if (configName != null) {
-            // @@@ Move to Sidekick and read at Sidekick init for device names for sampling
             File configFile = new File(Sidekick.SD_CARD_PATH + "/FIRST/" + configName + ".xml");
             if (configFile.exists()) {
                 if ((chunkRemaining -= 8) < 0)
@@ -1838,7 +1902,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         minorError("Configuration file not found");
     }
 
-    /// Save all of the thread descriptors into chunks.
+    /// Save all the thread descriptors into chunks.
     void serializeThreadDescriptors() {
         if ((chunkRemaining -= 14) < 0)
             nextChunk();
@@ -1874,6 +1938,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         manifest.isBlocksOpMode = opMode instanceof BlocksOpMode;
         manifest.isLinearOpMode = opMode instanceof LinearOpMode;
         manifest.availableProcessors = Runtime.getRuntime().availableProcessors();
+        manifest.freeStorageSpace = new StatFs(Sidekick.SD_CARD_PATH).getAvailableBytes();
 
         Class<? extends OpMode> klass = opMode.getClass();
         manifest.opModeClass = rootName(klass.getName());
@@ -1904,7 +1969,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         putBytes(data);
     }
 
-    /// Initialize Lynx module information for Bulk Read processing.
+    /// Initialize Lynx module information for Bulk Read processing and for the manifest.
     void initializeLynxModuleInfo() {
         try {
             bulkDataRespField = LynxModule.BulkData.class.getDeclaredField("resp");
@@ -1916,21 +1981,27 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             return; // ====>
         }
 
-        // Be sure to use the original hardware map to avoid our 'getAll()' wrap!
-        List<LynxModule> lynxModuleList = hardwareMap.originalMap.getAll(LynxModule.class);
-        if (lynxModuleList.isEmpty()) {
+        // Be sure to use the original hardware map to avoid our wrapper!
+        Set<String> lynxNames = hardwareMap.originalMap.getAllNames(LynxModule.class);
+        if (lynxNames.isEmpty()) {
             minorError("Bulk read Lynx module");
         }
-        // 'lynxModuleMap' does not have to be complete in the event of failure:
-        manifest.lynxAddresses = new int[lynxModuleList.size()];
-        for (LynxModule module: lynxModuleList) {
+
+        manifest.lynxes = new LynxJson[lynxNames.size()];
+        for (String lynxName: lynxNames) {
+            LynxModule module = hardwareMap.originalMap.get(LynxModule.class, lynxName);
             Object bulkCachingLock = Sidekick.getInstanceField(module, "bulkCachingLock", Object.class);
             if ((bulkCachingLock != null) && (lynxModuleMap.size() < MAX_LYNX_COUNT)) {
-                LynxModuleInfo lynxInfo = new LynxModuleInfo(bulkCachingLock);
-                lynxInfo.module = module;
-                lynxInfo.id = lynxModuleMap.size();
-                manifest.lynxAddresses[lynxInfo.id] = module.getModuleAddress();
-                lynxModuleMap.put(module, lynxInfo);
+                // Lynx module state for caching bulk reads:
+                LynxModuleState lynxState = new LynxModuleState(bulkCachingLock);
+                lynxState.module = module;
+                lynxState.id = lynxModuleMap.size();
+                lynxModuleMap.put(module, lynxState);
+
+                // Lynx information for the Sidekick app:
+                int address = module.getModuleAddress();
+                String version = module.getNullableFirmwareVersionString();
+                manifest.lynxes[lynxState.id] = new LynxJson(lynxName, address, version != null ? version : "");
             } else {
                 minorError("Couldn't prepare for bulk reads");
             }
@@ -1940,9 +2011,6 @@ String versionString = BuildConfig.LIBRARY_VERSION;
     /// Delete the oldest captures until there's sufficient space for a new capture.
     void clearSpaceForNewCapture() {
         StatFs stat = new StatFs(Sidekick.SD_CARD_PATH);
-
-        Sidekick.logI("^^^ Available space: %,d bytes", stat.getAvailableBytes());
-
         File directory = new File(Sidekick.SUBDIRECTORY);
         File[] sidekickFiles = directory.listFiles((d, name) ->
                 name.endsWith(".sidekick")
@@ -1952,10 +2020,10 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                     a.getName().compareToIgnoreCase(b.getName())
             );
 
-            // Delete all Sidekick files that start with "1900-". Sidekick captures will be
+            // Delete all Sidekick files that start with '1900-'. Sidekick captures will be
             // created with that year only when OpModes are launched without having a connected
             // Driver Station to supply the robot with the current date and time. (I think
-            // this can happen only with FTC Dashboard.) Multiple files with "1900-" mess
+            // this can happen only with FTC Dashboard.) Multiple files with '1900-' mess
             // up our logic for downloading the newest capture so we contrive to ensure that
             // there is a maximum of one such file:
             for (File f: sidekickFiles) {
@@ -2017,23 +2085,30 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             opMode.telemetry = telemetry;
         }
 
-        // Lynx Module info is used for Bulk Read processing:
-        initializeLynxModuleInfo();
-
+        initializeLynxModuleInfo(); // Lynx Module info used for Bulk Read processing
         Sidekick.logI(LOGCAT_OP_MODE_INIT); // Mark the start of an opMode
+        // The capture is now fully prepared!
     }
 
-    /// Stop capturing and save all of the metadata.
+    /// Stop capturing and save all the metadata.
     void endCapture(String logcatMarkerMessage) {
         synchronized (sidekickLock) {
             // We may have already ended due to time limit or excessive size:
             if (isEnded) {
                 return; // ====>
             }
-            long startMillis = System.currentTimeMillis();
-            Sidekick.logI(logcatMarkerMessage); // Mark the end of the opMode
 
-            // Stop Limelight recording:
+            long startMillis = System.currentTimeMillis(); // Time how long this function takes
+
+            // Record interesting counter values. The user didn't ask for these queries so mark
+            // them as bonus:
+            markBonus(true);
+            recordCounterValues(Counters.instance.collectInteresting(true));
+            markBonus(false);
+
+            // Mark the end of the opMode and then stop screen and Limelight video recording:
+            Sidekick.logI(logcatMarkerMessage);
+            Socket.broadcastStopScreenRecord();
             if (limelightCapture != null) {
                 limelightCapture.stop();
                 if (limelightCapture.hasError) {
@@ -2041,11 +2116,9 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                 }
             }
 
-            // Stop screen recording:
-            Socket.broadcastStopScreenRecord();
-
             // If the opMode terminated because of an unhandled exception, record it:
-            RuntimeException exception = Sidekick.getInstanceField(opMode,"exception", RuntimeException.class);
+            RuntimeException exception = Sidekick.getInstanceField(
+                    opMode,"exception", RuntimeException.class);
             if (exception != null) {
                 if (beginRecord(RecordId.UNHANDLED_EXCEPTION, 0)) {
                     StringWriter writer = new StringWriter();
@@ -2073,9 +2146,10 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             sections[Section.METADATA].offset = getOffset();
             serializeManifest();
             serializeConfiguration();
-            serializeDeviceDescriptors();
             serializeStringTokens();
-            serializeSerializers();
+            serializeCounterDescriptors();
+            serializeDeviceDescriptors();
+            serializeSerializerDescriptors();
             serializeDynamicDescriptors(); // Must come last
             serializeThreadDescriptors();
             sections[Section.METADATA].size = getOffset() - sections[Section.METADATA].offset;
@@ -2105,6 +2179,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
     /// API entry points below here
 
     /// Return the original delegate of a wrapped proxy object.
+    @SuppressWarnings("unchecked") // Invariant: the wrappers retain the delegate's type
     static <T> T unwrap(T device) {
         if (device instanceof SidekickProxy) {
             return (T) ((SidekickProxy) device).unwrap();
@@ -2146,7 +2221,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
 
             int ignoredId = inBuffer.getInt();
             long timestamp = inBuffer.getLong(); // SystemClock.uptimeMillis()
-            // Collect all of the floats, creating a bitmask to mark the non-zero values:
+            // Collect all the floats, creating a bitmask to mark the non-zero values:
             float[] floats = new float[GAMEPAD_FLOAT_COUNT];
             int nonzeroMask = 0;
             int payloadSize = 0;
@@ -2302,8 +2377,8 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                 chunk.put((byte) (tickTime >> 16));
                 chunk.putShort((short) tickTime);
                 chunk.putShort(tokenizeString(format)); // Assume it's not a dynamic string so tokenize
-                for (int i = 0; i < descriptor.paramPutters.length; i++) {
-                    descriptor.paramPutters[i].accept(args[i]);
+                for (int i = 0; i < descriptor.paramPutters.size(); i++) {
+                    descriptor.paramPutters.get(i).accept(args[i]);
                 }
             }
             assertChunk();
@@ -2355,8 +2430,8 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             if (beginRecord(descriptor.recordId + varargsType,
                     descriptor.recordLength + 2)) {
                 chunk.putShort(tokenizeString(format)); // Assume it's not a dynamic string so tokenize
-                for (int i = 0; i < descriptor.paramPutters.length; i++) {
-                    descriptor.paramPutters[i].accept(args[i]);
+                for (int i = 0; i < descriptor.paramPutters.size(); i++) {
+                    descriptor.paramPutters.get(i).accept(args[i]);
                 }
                 assertChunk();
 
@@ -2418,8 +2493,8 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                 if ((flags & VarargsFlags.ADD_DATA_WITH_FORMAT) != 0) {
                     chunk.putShort(tokenizeString(format));
                 }
-                for (int i = 0; i < descriptor.paramPutters.length; i++) {
-                    descriptor.paramPutters[i].accept(args[i]);
+                for (int i = 0; i < descriptor.paramPutters.size(); i++) {
+                    descriptor.paramPutters.get(i).accept(args[i]);
                 }
                 assertChunk();
                 return wrappedItem;
@@ -2450,8 +2525,8 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                 if ((flags & VarargsFlags.SET_VALUE_WITH_FORMAT) != 0) {
                     chunk.putShort(tokenizeString(format));
                 }
-                for (int i = 0; i < descriptor.paramPutters.length; i++) {
-                    descriptor.paramPutters[i].accept(args[i]);
+                for (int i = 0; i < descriptor.paramPutters.size(); i++) {
+                    descriptor.paramPutters.get(i).accept(args[i]);
                 }
                 assertChunk();
                 return wrappedItem;
@@ -2666,8 +2741,8 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                     if (beginRecord(descriptor.recordId + VarargsType.LOG_ADD,
                             2 + descriptor.recordLength)) {
                         chunk.putShort(tokenizeString(format));
-                        for (int i = 0; i < descriptor.paramPutters.length; i++) {
-                            descriptor.paramPutters[i].accept(args[i]);
+                        for (int i = 0; i < descriptor.paramPutters.size(); i++) {
+                            descriptor.paramPutters.get(i).accept(args[i]);
                         }
                         assertChunk();
                     }
@@ -2784,7 +2859,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             synchronized (sidekickLock) {
                 if (beginRecord(RecordId.TELEMETRY_ADD_LINE, 3)) {
                     putInt24(wrappedLine.identifier);
-                    putString(lineCaption, MAX_STRING_BYTES); // Allow really big strings
+                    putString(lineCaption, MAX_STRING_BYTES); // Allow oversized strings
                     assertChunk();
                 }
             }
@@ -2864,8 +2939,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
     }
 
     /// SkHardwareMap doesn't wrap the original [HardwareMap] instantiation but rather replaces it
-    /// entirely. However, it shares all of the public and protected fields of the original.
-    @SuppressWarnings("unchecked")
+    /// entirely. However, it shares all the public and protected fields of the original.
     public class SkHardwareMap extends HardwareMap {
         HardwareMap originalMap; // Original unhooked HardwareMap
         Capture capture; // Associated capture
@@ -2875,7 +2949,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             this.originalMap = original;
             this.capture = capture;
 
-            // Copy all of the public and protected fields from the original HardwareMap:
+            // Copy all the public and protected fields from the original HardwareMap:
             Class<?> clazz = original.getClass();
             for (Field field : clazz.getDeclaredFields()) {  // scan all fields
                 int modifiers = field.getModifiers();
@@ -2896,35 +2970,36 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             /// [HardwareMap#voltageSensor] [DeviceMapping] in order to acquire voltage sensor
             /// instances. As such, we wrap the contents of that DeviceMapping here. Note that
             /// [Sidekick#onOpModePreInit] is guaranteed to have already primed the cache for
-            /// VoltageSensor outside of the Sidekick lock.
+            /// VoltageSensor outside the Sidekick lock.
             Map<String, VoltageSensor> map = null;
             try {
                 Class<?> deviceMappingClass = original.voltageSensor.getClass();
                 Field mapField = deviceMappingClass.getDeclaredField("map");
                 mapField.setAccessible(true);
-                map = (Map<String, VoltageSensor>) (mapField.get(original.voltageSensor));
+
+                @SuppressWarnings("unchecked") // SDK guarantee: 'map' field has type Map<String, VoltageSensor>
+                Map<String, VoltageSensor> castMap =
+                        (Map<String, VoltageSensor>) mapField.get(original.voltageSensor);
+                map = castMap;
             } catch (NoSuchFieldException | IllegalAccessException ignored) {}
 
             if (map != null) {
                 for (Map.Entry<String, VoltageSensor> entry : map.entrySet()) {
                     entry.setValue(new SkVoltageSensor(this, entry.getValue(), entry.getKey()));
-                    Sidekick.logI("*** Wrapped VoltageSensor '%s'", entry.getKey());
                 }
             } else {
                 minorError("Voltage sensor");
             }
-
-            Sidekick.logI("*** Wrapped HardwareMap");
         }
 
-        /// Wrap a single device object for archiving. `originalClass` is usually an
-        /// interface like [DcMotorEx] derived from [HardwareDevice] but can actually be
-        /// a made up class.
-        DeviceInfo getDeviceInfo(Class<?> originalClass) {
+        /// Register information about a device object for archiving. `originalClass` is usually
+        /// an interface like [DcMotorEx] derived from [HardwareDevice] but can actually be a
+        /// made up class.
+        DeviceClassInfo registerDeviceClassInfo(Class<?> originalClass) {
             // See if a proxy class already exists in our cache, otherwise we'll have to create
             // it. We have a simple list rather than a HashMap because there are always so few
             // entries.
-            for (DeviceInfo cache: deviceClassArray) {
+            for (DeviceClassInfo cache: deviceClassArray) {
                 if (cache.originalClass == originalClass) {
                     return cache;
                 }
@@ -2954,18 +3029,18 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             }
 
             // Create a cache entry::
-            DeviceInfo deviceInfo = new DeviceInfo();
-            deviceInfo.deviceId = deviceClassArray.size(); // Increment with every new ID
-            deviceInfo.originalClass = originalClass;
-            deviceInfo.busType = busType;
-            deviceInfo.maxInstances = Math.max(deviceCount, 1); // Always at least one instance
-            deviceInfo.isBulkReader = DcMotor.class.isAssignableFrom(originalClass) ||
+            DeviceClassInfo classInfo = new DeviceClassInfo();
+            classInfo.deviceId = deviceClassArray.size(); // Increment with every new ID
+            classInfo.originalClass = originalClass;
+            classInfo.busType = busType;
+            classInfo.maxInstances = Math.max(deviceCount, 1); // Always at least one instance
+            classInfo.isBulkReader = DcMotor.class.isAssignableFrom(originalClass) ||
                     AnalogInput.class.isAssignableFrom(originalClass) ||
                     DigitalChannel.class.isAssignableFrom(originalClass);
-            deviceInfo.isPinpoint = GoBildaPinpointDriver.class.isAssignableFrom(originalClass);
-            deviceInfo.isLimelight = Limelight3A.class.isAssignableFrom(originalClass);
-            deviceClassArray.add(deviceInfo);
-            return deviceInfo;
+            classInfo.isPinpoint = GoBildaPinpointDriver.class.isAssignableFrom(originalClass);
+            classInfo.isLimelight = Limelight3A.class.isAssignableFrom(originalClass);
+            deviceClassArray.add(classInfo);
+            return classInfo;
         }
 
         /// Create a proxy instance.
@@ -2995,7 +3070,8 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         /// (or one of the Get variants). We use Byte Buddy to programmatically create a derived
         /// class with all public methods serializing their parameters and forwarding to the
         /// original delegate object to do the actual work.
-        <T> T wrapDevice(@NonNull T originalObject, @NonNull String deviceName) {
+        <T> T wrapDevice(@NonNull T originalObject, @NonNull String deviceName,
+                 @NonNull Class<? extends T> classOrInterface) {
             // Check for some early outs:
             if (isStarted) {
                 return originalObject; // ====> Don't wrap after Start is pressed; it takes too long!
@@ -3008,7 +3084,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             deviceName = deviceName.trim();
 
             /// [ProxyBuilder#primeCache] is extremely slow (hundreds of milliseconds); call it
-            /// outside of the lock (or have previously called it outside of the lock):
+            /// outside the lock (or have previously called it outside the lock):
             sidekick.proxyBuilder.primeCache(originalClass);
             Class<?> proxyClass = sidekick.proxyBuilder.getCache(originalClass);
             if (proxyClass == null) {
@@ -3027,25 +3103,25 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             }
 
             synchronized(sidekickLock) {
-                DeviceInfo deviceInfo = getDeviceInfo(originalClass);
+                DeviceClassInfo classInfo = registerDeviceClassInfo(originalClass);
 
                 // Check to see if this device name already exists for this class of device:
-                int instanceId = deviceInfo.deviceNames.indexOf(deviceName);
+                int instanceId = classInfo.deviceNames.indexOf(deviceName);
                 if (instanceId != -1) {
                     // The user previous called 'get' for this device; return the same instance:
-                    return (T) deviceInfo.proxyInstances.get(instanceId); // ====>
+                    return classOrInterface.cast(classInfo.proxyInstances.get(instanceId)); // ====>
                 }
 
                 // Determine the index to use as the instance identifier:
-                instanceId = deviceInfo.deviceNames.size();
-                if (instanceId >= deviceInfo.maxInstances) {
+                instanceId = classInfo.deviceNames.size();
+                if (instanceId >= classInfo.maxInstances) {
                     minorError("Too many instances of %s: %d", deviceName, instanceId);
                     return originalObject; // ====>
                 }
 
                 // Create the context for this particular device instance, then instantiate:
                 Interceptor.Context context = new Interceptor.Context(this.capture, originalObject,
-                        deviceInfo, 0, instanceId);
+                        classInfo, 0, instanceId);
                 T proxyInstance = instantiateProxy(proxyClass, context, originalObject);
                 if (proxyInstance == null) {
                     minorError("Proxy class");
@@ -3053,8 +3129,8 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                 }
 
                 // Now that we're guaranteed success, commit the results:
-                deviceInfo.deviceNames.add(deviceName);
-                deviceInfo.proxyInstances.add((HardwareDevice) proxyInstance);
+                classInfo.deviceNames.add(deviceName);
+                classInfo.proxyInstances.add((HardwareDevice) proxyInstance);
 
                 // Do some device-specific special-case initialization:
                 if (originalObject instanceof GoBildaPinpointDriver) {
@@ -3068,13 +3144,33 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                     usingCamera = true;
                 }
 
-                // If this is the first Limelight seen, stash its IP address for video capture at Start:
-                if ((deviceInfo.isLimelight) && (capture.limelightAddress == null)) {
+                // Do some extra processing for the first Limelight instance we see.
+                if ((classInfo.isLimelight) && (instanceId == 0)) {
+                    // Stash the IP address for video capture at Start:
                     InetAddress inetAddress = Sidekick.getInstanceField(originalObject, "inetAddress", InetAddress.class);
                     if (inetAddress != null) {
                         capture.limelightAddress = inetAddress.getHostAddress();
                     } else {
                         minorError("Limelight IP address");
+                    }
+
+                    if (originalObject instanceof Limelight3A) {
+                        long startMillis = System.currentTimeMillis();
+                        Limelight3A limelight = (Limelight3A) originalObject;
+                        try {
+                            Method getPipelineMethod = Limelight3A.class.getDeclaredMethod("getPipelineAtIndex", int.class);
+                            getPipelineMethod.setAccessible(true);
+                            for (int i = 0; i < 10; i++) {
+                                JSONObject pipeline = (JSONObject) getPipelineMethod.invoke(limelight, i);
+                                if (pipeline != null) {
+                                    manifest.limelightPipelines[i] = pipeline.toString();
+                                }
+                            }
+                        } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException ignored) {
+                            minorError("Couldn't access Limelight pipeline");
+                        }
+                        long endMillis = System.currentTimeMillis();
+                        Sidekick.logI("Took %d millis", (int) (endMillis - startMillis));
                     }
                 }
                 return proxyInstance;
@@ -3082,13 +3178,13 @@ String versionString = BuildConfig.LIBRARY_VERSION;
         }
 
         /// Wrap a select class returned from a wrapped [HardwareDevice] object.
-        <T> T wrapChild(@NonNull T originalObject, DeviceInfo deviceInfo, int instanceId, int childId) {
+        <T> T wrapChild(@NonNull T originalObject, DeviceClassInfo classInfo, int instanceId, int childId) {
             if (!(originalObject instanceof SidekickProxy)) {
                 Class<?> proxyClass = sidekick.proxyBuilder.getCache(originalObject.getClass());
                 if (proxyClass != null) {
                     // Create the context for this particular device instance and instantiate:
                     Interceptor.Context context = new Interceptor.Context(this.capture,
-                            originalObject, deviceInfo, childId, instanceId);
+                            originalObject, classInfo, childId, instanceId);
                     T proxyInstance = instantiateProxy(proxyClass, context, originalObject);
                     if (proxyInstance != null) {
                         return proxyInstance; // ====> Success!
@@ -3101,7 +3197,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             return originalObject;
         }
 
-        /// Helper for [#hasAnnotation]
+        /// Helper for [#hasAnnotation].
         private Class<? extends Annotation> getRepeatableContainer(Class<? extends Annotation> annotation) {
             Repeatable rep = annotation.getAnnotation(Repeatable.class);
             return rep == null ? null : rep.value();
@@ -3141,14 +3237,14 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             long nanoStartTime = nanoTime();
             T device = super.get(classOrInterface, deviceName); // Result is guaranteed non-null
             recordHardwareMapGet("get", nanoStartTime, classOrInterface, deviceName);
-            return wrapDevice(device, deviceName);
+            return wrapDevice(device, deviceName, classOrInterface);
         }
 
         @Override public HardwareDevice get(String deviceName) {
             long nanoStartTime = nanoTime();
             HardwareDevice device = super.get(deviceName); // Result is guaranteed non-null
             recordHardwareMapGet("get", nanoStartTime, device.getClass(), deviceName);
-            return wrapDevice(device, deviceName);
+            return wrapDevice(device, deviceName, HardwareDevice.class);
         }
 
         @Override public @Nullable <T> T tryGet(Class<? extends T> classOrInterface, String deviceName) {
@@ -3158,7 +3254,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
                 return null;
             }
             recordHardwareMapGet("tryGet", nanoStartTime, classOrInterface, deviceName);
-            return wrapDevice(device, deviceName);
+            return wrapDevice(device, deviceName, classOrInterface);
         }
 
         @Override public @Nullable <T> T get(Class<? extends T> classOrInterface, SerialNumber serialNumber) {
@@ -3169,7 +3265,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
             }
             String deviceName = SerialNumber.getDeviceDisplayName(serialNumber);
             recordHardwareMapGet("get", nanoStartTime, classOrInterface, deviceName);
-            return wrapDevice(device, deviceName);
+            return wrapDevice(device, deviceName, classOrInterface);
         }
 
         @Override public <T> List<T> getAll(Class<? extends T> classOrInterface) {
@@ -3185,7 +3281,7 @@ String versionString = BuildConfig.LIBRARY_VERSION;
 
                 // We cheesily return a record for each device found:
                 recordHardwareMapGet("getAll", nanoStartTime, classOrInterface, name);
-                result.add(wrapDevice(device, name));
+                result.add(wrapDevice(device, name, classOrInterface));
 
                 // The first device record gets the actual duration; subsequent device records
                 // returned by the call appear with very little consumed time:

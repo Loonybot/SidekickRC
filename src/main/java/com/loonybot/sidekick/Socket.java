@@ -1,4 +1,4 @@
-/// Socket logic for managing Sidekick communication with the PC.
+/// Socket logic for managing communication with the PC Sidekick application.
 ///
 /// Copyright James Goossen.
 package com.loonybot.sidekick;
@@ -185,7 +185,7 @@ class Socket extends NanoWSD.WebSocket {
                 // Request that the active opMode be stopped:
                 eventLoop.requestOpModeStop(activeOpMode);
 
-                // Wait on the capture file to be closed, with a 5 second timeout. Note that if
+                // Wait on the capture file to be closed, with a 5-second timeout. Note that if
                 // the capture has already been ended (e.g., because it hit 120 seconds), the
                 // latch will already be closed.
                 try {
@@ -241,8 +241,6 @@ class Socket extends NanoWSD.WebSocket {
         String filename = payloadGet(request, "filename", ""); // With .sidekick extension
         long pcUnixTime = payloadGet(request, "pc_unix_time", 0L);
 
-        Sidekick.logI("handleDownloadHeader: %s", filename); // @@@
-
         File captureFile = new File(Sidekick.SUBDIRECTORY, filename);
         Header header = Header.read(captureFile);
         if (header == null) {
@@ -275,10 +273,6 @@ class Socket extends NanoWSD.WebSocket {
                 ? Sidekick.gson.fromJson(request.get("sections"), int[].class)
                 : new int[0];
 
-        Sidekick.logI("handleDownloadData: %s", filename); // @@@
-
-        byte[] chunkBuffer = new byte[CHUNK_SIZE]; // Kind of big so allocate here once and reuse
-
         File captureFile = new File(Sidekick.SUBDIRECTORY, filename);
         Header header = Header.read(captureFile);
         if (header == null) {
@@ -291,37 +285,43 @@ class Socket extends NanoWSD.WebSocket {
         // Send the successful download_response:
         sendJson(response);
 
-        // Blast binary chunks section by section:
-        boolean success = true;
-        try (RandomAccessFile file = new RandomAccessFile(captureFile, "r")) {
-            for (int section : sections) { // Handle in order of the sections array
-                int offset = header.sections[section].offset;
-                int size = header.sections[section].size;
-                if (size != 0) {
-                    if (!uploadFileSection(file, offset, size, chunkBuffer)) {
-                        success = false;
-                        break;
+        // Blast binary chunks section by section on a background thread. This keeps NanoWSD's
+        // I/O thread free to keep reading incoming frames (so it can auto-reply to the PC's
+        // keep-alive pings and notice a download_cancel) while a large transfer is in progress;
+        // otherwise the PC's ping_timeout can fire mid-transfer and the connection is torn down.
+        new Thread(() -> {
+            byte[] chunkBuffer = new byte[CHUNK_SIZE]; // Kind of big so allocate here once and reuse
+            boolean success = true;
+            try (RandomAccessFile file = new RandomAccessFile(captureFile, "r")) {
+                for (int section : sections) { // Handle in order of the sections array
+                    int offset = header.sections[section].offset;
+                    int size = header.sections[section].size;
+                    if (size != 0) {
+                        if (!uploadFileSection(file, offset, size, chunkBuffer)) {
+                            success = false;
+                            break;
+                        }
                     }
                 }
+            } catch (IOException e) {
+                success = false;
             }
-        } catch (IOException e) {
-            success = false;
-        }
 
-        // Signal end of binary stream:
-        JsonObject done = createPush("download_done"); // Same op for all download types
-        if (cancelRequested) {
-            done.addProperty("error", "Cancelled");
-        } else if (!success) {
-            done.addProperty("error", "File error");
-        }
-        sendJson(done);
-        Sidekick.logI("download_done, cancelled=%s, success=%s", cancelRequested, success);
+            // Signal end of binary stream:
+            JsonObject done = createPush("download_done"); // Same op for all download types
+            if (cancelRequested) {
+                done.addProperty("error", "Cancelled");
+            } else if (!success) {
+                done.addProperty("error", "File error");
+            }
+            sendJson(done);
+            Sidekick.logI("download_done, cancelled=%s, success=%s", cancelRequested, success);
+        }, "DownloadData").start();
     }
 
     /// Screen recordings are weird because they are invoked via ADB from the PC so we don't
-    /// have a good way of knowing when they're done (or even if they were started), but we
-    /// want them to be done before send them to the PC.
+    /// have a good way of knowing when they're done (or even if they were started). However,
+    /// we want them to be done before we send them to the PC.
     @SuppressWarnings("BusyWait")
     boolean waitForScreenRecordingDone(String captureName, File screenFile) {
         final int MAX_RECORDING_TIME_MS = 180000; // Maximum screen recording time (180 seconds)
@@ -333,7 +333,7 @@ class Socket extends NanoWSD.WebSocket {
         }
 
         // Read the capture's header:
-        Header header = Header.read(new File(Sidekick.SUBDIRECTORY, captureName + ".sidekick")); // @@@ Very inconsistent use of extension
+        Header header = Header.read(new File(Sidekick.SUBDIRECTORY, captureName + ".sidekick"));
         if (header == null) {
             return false; // ====> Whoops, something went wrong
         }
@@ -383,8 +383,6 @@ class Socket extends NanoWSD.WebSocket {
         // Derive the original supplement base name from the final capture name:
         String supplementBaseName = FileWorker.getDateAndTimeFromCaptureName(captureName);
 
-        Sidekick.logI("Converted '%s' to '%s':", captureName, supplementBaseName); // @@@
-
         File limelightFile = new File(Sidekick.SUBDIRECTORY + "/" + supplementBaseName + ".lvc");
         File screenFile = new File(Sidekick.SUBDIRECTORY + "/" + supplementBaseName + ".mp4");
 
@@ -397,40 +395,45 @@ class Socket extends NanoWSD.WebSocket {
         int limelightSize = (limelightFile.exists()) ? (int) limelightFile.length() : 0;
         int screenSize = (screenFile.exists()) ? (int) screenFile.length() : 0;
 
-        Sidekick.logI("file name: %s, limelightSize: %d, screenSize: %d", limelightFile.getName(), limelightSize, screenSize); // @@@
-
         JsonArray sizeArray = new JsonArray();
         sizeArray.add(limelightSize);
         sizeArray.add(screenSize);
         response.add("sizes", sizeArray);
         sendJson(response);
 
-        byte[] chunkBuffer = new byte[CHUNK_SIZE]; // Kind of big so allocate here once and reuse
         cancelRequested = false; // Reset any stale cancel from a previous download
+        final boolean waitSuccess = success; // Capture for the lambda below (must be effectively final)
 
-        if (limelightSize != 0) {
-            try (RandomAccessFile file = new RandomAccessFile(limelightFile, "r")) {
-                if (!uploadFileSection(file, 0, limelightSize, chunkBuffer)) {
-                    success = false;
-                }
-            } catch (IOException ignored) { success = false; }
-        }
-        if (screenSize != 0) {
-            try (RandomAccessFile file = new RandomAccessFile(screenFile, "r")) {
-                if (!uploadFileSection(file, 0, screenSize, chunkBuffer)) {
-                    success = false;
-                }
-            } catch (IOException ignored) { success = false; }
-        }
+        // Blast the sections on a background thread so NanoWSD's I/O thread stays free to keep
+        // reading incoming frames (auto-replying to keep-alive pings, noticing download_cancel)
+        // while the (possibly large) transfer is in progress.
+        new Thread(() -> {
+            boolean sectionSuccess = waitSuccess;
+            byte[] chunkBuffer = new byte[CHUNK_SIZE]; // Kind of big so allocate here once and reuse
+            if (limelightSize != 0) {
+                try (RandomAccessFile file = new RandomAccessFile(limelightFile, "r")) {
+                    if (!uploadFileSection(file, 0, limelightSize, chunkBuffer)) {
+                        sectionSuccess = false;
+                    }
+                } catch (IOException ignored) { sectionSuccess = false; }
+            }
+            if (screenSize != 0) {
+                try (RandomAccessFile file = new RandomAccessFile(screenFile, "r")) {
+                    if (!uploadFileSection(file, 0, screenSize, chunkBuffer)) {
+                        sectionSuccess = false;
+                    }
+                } catch (IOException ignored) { sectionSuccess = false; }
+            }
 
-        // Signal end of binary stream:
-        JsonObject done = createPush("download_done"); // Same op for all download types
-        if (cancelRequested) {
-            done.addProperty("error", "Cancelled");
-        } else if (!success) {
-            done.addProperty("error", "File error");
-        }
-        sendJson(done);
+            // Signal end of binary stream:
+            JsonObject done = createPush("download_done"); // Same op for all download types
+            if (cancelRequested) {
+                done.addProperty("error", "Cancelled");
+            } else if (!sectionSuccess) {
+                done.addProperty("error", "File error");
+            }
+            sendJson(done);
+        }, "DownloadSupplements").start();
     }
 
     /// Blast a section of a file as a sequence of binary frames. Each frame: CHUNK_SIZE bytes
@@ -497,20 +500,19 @@ class Socket extends NanoWSD.WebSocket {
         JsonObject response = createResponse(request);
 
         // Return an array of descriptors for each available realtime counters:
-        LinkedList<RealtimeDescriptor> descriptors = Realtime.getSupportedCounters();
+        List<CounterDescriptor> descriptors = Realtime.getSupportedCounters();
         JsonArray counters = new JsonArray();
-        for (RealtimeDescriptor descriptor: descriptors) {
+        for (CounterDescriptor descriptor: descriptors) {
             JsonObject counter = new JsonObject();
             counter.addProperty("id", descriptor.id);
             counter.addProperty("description", descriptor.description);
             counter.addProperty("unit", descriptor.unit);
             counter.addProperty("is_integer", descriptor.isInteger);
-            counter.addProperty("min", descriptor.recommended_min);
-            counter.addProperty("max", descriptor.recommended_max);
+            counter.addProperty("min", 0);
+            counter.addProperty("max", 0);
             counters.add(counter);
         }
         response.add("counters", counters);
-        response.addProperty("update_interval",SampleWorker.REALTIME_UPDATE_PERIOD);
         sendJson(response);
     }
 
@@ -542,12 +544,17 @@ class Socket extends NanoWSD.WebSocket {
                 counters.add(counter);
             }
         }
+
         message.add("counters", counters);
+
+        // The refresh interval is how many realtime_sample messages it takes to refresh any
+        // device sample. Because it's a hint, we don't worry about synchronization.
+        message.addProperty("refresh_interval", Counters.instance.getRefreshInterval());
         sendJson(message);
     }
 
     /// Broadcast a message to all connected PCs to let them know that Start has just been
-    /// pressed on the Driver Station and they can start screen recording if they have an ADB
+    /// pressed on the Driver Station. They can start screen recording if they have an ADB
     /// connection. `timeLimit` is in seconds.
     static void broadcastStartScreenRecord(String fileName, boolean usingCamera, int timeLimit) {
         JsonObject message = createPush("start_screen_record");
@@ -562,7 +569,7 @@ class Socket extends NanoWSD.WebSocket {
     }
 
     /// Broadcast a message to all connected PCs to let them know that Stop has just been
-    /// pressed and they should stop screen recording if they were recording.
+    /// pressed. They should stop screen recording if they were recording.
     static void broadcastStopScreenRecord() {
         JsonObject message = createPush("stop_screen_record");
         synchronized(lock) {
@@ -596,8 +603,8 @@ class Socket extends NanoWSD.WebSocket {
     // NanoWSD message dispatch
     // ---------------------------------------------------------------------------------------------
 
-    /// Called by NanoWSD for every incoming WebSocket frame.
-    /// All PC to Robot messages are JSON text frames; binary frames from PC are ignored.
+    /// Called by NanoWSD for every incoming WebSocket frame. All PC to Robot messages are JSON
+    /// text frames; binary frames from PC are ignored.
     @Override protected void onMessage(NanoWSD.WebSocketFrame frame) {
         if (frame.getOpCode() != NanoWSD.WebSocketFrame.OpCode.Text) {
             Sidekick.logW("Unexpected binary frame from PC — ignoring");
@@ -605,8 +612,6 @@ class Socket extends NanoWSD.WebSocket {
         }
 
         String text = frame.getTextPayload();
-        Sidekick.logI("onMessage: %.240s", text);
-
         JsonObject payload;
         try {
             payload = new JsonParser().parse(text).getAsJsonObject();

@@ -116,7 +116,7 @@ class FileWorker {
     /// The file worker thread's entry point.
     private void loop() {
         Thread.currentThread().setName(Sidekick.FILE_WORKER_THREAD_NAME);
-        Sidekick.instance.registerThreadStart(Sidekick.FILE_WORKER_THREAD_NAME);
+        Sidekick.instance.beginThread(Sidekick.FILE_WORKER_THREAD_NAME);
 
         // We take the opportunity now to do some pre-processing in parallel with the primary
         // thread. The first proxy call to Byte Buddy is stupendously slow (presumably because

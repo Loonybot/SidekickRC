@@ -8,24 +8,12 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 
-import com.qualcomm.hardware.limelightvision.Limelight3A;
-import com.qualcomm.hardware.lynx.LynxModule;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.OpModeManagerImpl;
-import com.qualcomm.robotcore.hardware.AnalogInput;
-import com.qualcomm.robotcore.hardware.DcMotorEx;
-import com.qualcomm.robotcore.hardware.HardwareDevice;
-import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.RobotLog;
 
-import org.firstinspires.ftc.robotcore.external.navigation.CurrentUnit;
-import org.firstinspires.ftc.robotcore.external.navigation.TempUnit;
-import org.firstinspires.ftc.robotcore.external.navigation.VoltageUnit;
-
-import java.io.FileInputStream;
 import java.lang.reflect.Field;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -36,60 +24,27 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
-/// Descriptor for enumerating supported realtime counter types.
-class RealtimeDescriptor {
-    String id; // Identifier of the counter
-    String description; // Description of the counter
-    String unit; // Unit (e.g., "C")
-    boolean isInteger; // True if the counter represents an integer
-    float recommended_min; // Recommended minimum value for the graph (both min and max can be zero)
-    float recommended_max; // Recommended maximum value for the graph
-    public RealtimeDescriptor(String id, String description, String unit, boolean isInteger, float min, float max) {
-        this.id = id;
-        this.description = description;
-        this.unit = unit;
-        this.isInteger = isInteger;
-        this.recommended_min = min;
-        this.recommended_max = max;
-    }
-}
-
-/// Values repository for realtime counters.
+/// Values repository for realtime counters. Non-instanced and only has static methods.
+/// This is the interface between the Sockets and Sampling logic.
 class Realtime {
     static final Object lock = new Object(); // Lock for the realtime repository
-    static LinkedList<RealtimeDescriptor> supportedCounters = new LinkedList<>(); // Supported counters
-    static HashMap<Socket, Set<String>> subscriptions = new HashMap<>(); // List of counters by socket
+    static List<CounterDescriptor> supportedCounters = new ArrayList<>(); // List of supported realtime counters>
+    static HashMap<Socket, Set<String>> subscriptions = new HashMap<>(); // List of subscribed counter IDs by socket
     static HashMap<String, List<Float>> counterValues = new HashMap<>(); // List of accumulated values for each counter
+    static int updateUniqueness; // Uniqueness incremented every time a subscription changes
+    static int queryUniqueness; // If this uniqueness is different from updateUniqueness, there's a new subscription
 
-    /// Return a list of supported realtime counters.
-    static LinkedList<RealtimeDescriptor> getSupportedCounters() {
-        return supportedCounters;
+    /// Return a list of supported realtime counters. Empty if the counter tracker is not
+    /// initialized. Thread safe.
+    static List<CounterDescriptor> getSupportedCounters() {
+        return Realtime.supportedCounters;
     }
 
-    /// Register a supported realtime counter. Thread safe. Can be called multiple times for
-    /// the same counter. The min and max values are optional recommended values and can both
-    /// be zero.
-    static void register(String counterId, String description, String unit, boolean isInteger) {
-        register(counterId, description, unit, isInteger, 0, 0);
-    }
-    static void register(String counterId, String description, String unit, boolean isInteger, float min, float max) {
-        synchronized(lock) {
-            supportedCounters.add(new RealtimeDescriptor(counterId, description, unit, isInteger, min, max));
-        }
-    }
-
-    /// Return true if the specified counter is supported.
-    static boolean isRegistered(String counterId) {
-        synchronized(lock) {
-            for (RealtimeDescriptor descriptor : supportedCounters) {
-                if (descriptor.id.equals(counterId)) {
-                    return true;
-                }
-            }
-            return false;
-        }
+    static void setSupportedCounters(List<CounterDescriptor> supportedCounters) {
+        Realtime.supportedCounters = supportedCounters;
+        updateUniqueness++;
+        forceActiveCounterUpdate();
     }
 
     /// Update the list of realtime counters subscribed by the specified socket.
@@ -121,27 +76,48 @@ class Realtime {
                     counterValues.remove(counter);
                 }
             }
+
+            // Mark that the list of counters has changed:
+            updateUniqueness++;
         }
     }
 
-    /// Return the list of realtime counters subscribed by all sockets. Thread safe.
-    static Set<String> getSubscribedIds() {
+    /// Get the list of realtime counters subscribed by all sockets. Thread safe.
+    static Set<String> getSubscription() {
         synchronized (lock) {
             // Make a copy of the values for thread safety:
             return new HashSet<>(counterValues.keySet());
         }
     }
 
-    /// Counter producers call this to notify us of new values. We record the value if a
-    /// socket has subscribed to this particular counter. Thread safe.
-    static void post(String counterName, double value) {
-        assert(isRegistered(counterName));
-        // Note that we don't need to acquire the lock: there is never thread contention for
-        // the same counter/list, and Java won't crash if unsubscribing at the same time.
-        List<Float> values = counterValues.get(counterName);
-        if (values != null) {
-            // A socket has subscribed to this counter, so record the value:
-            values.add((float) value);
+    /// Return true if the list of active counters needs to be updated. This might be
+    /// because a socket asked for new counters, or because the user called Sk.setSamplers().
+    static boolean queryActiveCounterUpdate() {
+        synchronized (lock) {
+            boolean needsUpdate = queryUniqueness != updateUniqueness;
+            queryUniqueness = updateUniqueness;
+            return needsUpdate;
+        }
+    }
+
+    /// Mark that the list of counters has changed. Thread safe.
+    static void forceActiveCounterUpdate() {
+        synchronized (lock) {
+            updateUniqueness++;
+        }
+    }
+
+    /// Append the new counter values to the queued list that is waiting to get pushed to the
+    /// sockets. Thread safe.
+    static void queue(List<CounterValue> newValues) {
+        for (CounterValue newValue : newValues) {
+            // Note that we don't need to acquire the lock: there is never thread contention for
+            // the same counter/list, and Java won't crash if unsubscribing at the same time.
+            List<Float> values = counterValues.get(newValue.id);
+            if (values != null) {
+                // A socket has subscribed to this counter, so record the value:
+                values.add((float) newValue.value); // Cast from double
+            }
         }
     }
 
@@ -182,363 +158,6 @@ class PeriodTracker {
             return true;
         }
         return false;
-    }
-}
-
-/// Sampler of various CPU performance metrics.
-class CpuSampler {
-    // Governors docs: // https://android.googlesource.com/kernel/common/+/a7827a2a60218b25f222b54f77ed38f57aebe08b/Documentation/cpu-freq/governors.txt
-    enum Governor { PERFORMANCE, POWER_SAVE, USERSPACE, ON_DEMAND, CONSERVATIVE, INTERACTIVE, OFFLINE, OTHER }
-    long previousTotal;
-    long previousIdle;
-    boolean first = true; // True if the very first sample
-
-    CpuSampler() {
-        Realtime.register("system_load", "CPU utilization (all cores)", "%", true, 0, 100);
-        Realtime.register("online_count", "Count of cores online", "", true, 0, 4);
-        Realtime.register("governor", "CPU governor mode", "", true);
-        Realtime.register("frequency", "CPU frequency", "MHz", true, 400, 1600);
-        Realtime.register("temperature", "CPU temperature", "C", true, 0, 80);
-    }
-
-    /// Record of the data.
-    static class Record {
-        int systemLoad; // Percentage utilization [0-100]
-        int onlineCount; // Count of cores currently online
-        Governor governor; // Cluster governor
-        int frequencyMhz; // Cluster frequency, MHz
-        int temperature; // Temperature, centi-degrees
-
-        void post() {
-            Realtime.post("system_load", systemLoad);
-            Realtime.post("online_count", onlineCount);
-            Realtime.post("governor", governor.ordinal());
-            Realtime.post("frequency", frequencyMhz);
-            Realtime.post("temperature", temperature / 100.0);
-        }
-
-        void put(ByteBuffer chunk) {
-            chunk.put((byte) systemLoad);
-            chunk.put((byte) onlineCount);
-            chunk.put((byte) governor.ordinal());
-            chunk.putShort((short) frequencyMhz);
-            chunk.putShort((short) temperature);
-        }
-        static final int PUT_SIZE = 7;
-    }
-
-    /// Sample CPU performance.
-    Record sample() {
-        Record result = new Record();
-        result.systemLoad = readSystemLoad();
-        result.onlineCount = readOnlineCount();
-        result.temperature = readTemperature();
-        result.frequencyMhz = readInt("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") / 1000;
-
-        String governorString = SampleWorker.readFirstLine("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
-        CpuSampler.Governor governor = CpuSampler.Governor.OTHER;
-        if (governorString != null) {
-            governorString = governorString.toLowerCase();
-            if (result.onlineCount == 0) {
-                governor = CpuSampler.Governor.OFFLINE;
-            } else if (governorString.contains("interactive")) {
-                governor = CpuSampler.Governor.INTERACTIVE;
-            } else if (governorString.contains("performance")) {
-                governor = CpuSampler.Governor.PERFORMANCE;
-            } else if (governorString.contains("powersave")) {
-                governor = CpuSampler.Governor.POWER_SAVE;
-            } else if (governorString.contains("userspace")) {
-                governor = CpuSampler.Governor.USERSPACE;
-            } else if (governorString.contains("ondemand")) {
-                governor = CpuSampler.Governor.ON_DEMAND;
-            } else if (governorString.contains("conservative")) {
-                governor = CpuSampler.Governor.CONSERVATIVE;
-            }
-        }
-        result.governor = governor;
-        return result;
-    }
-
-    /// Compute system load percentage from jiffies, returning an integer [0-100].
-    int readSystemLoad() {
-        String line = SampleWorker.readFirstLine("/proc/stat");
-        if (line == null) {
-            return 0;
-        }
-
-        SplitParser splitParser = new SplitParser(line, 0);
-        long user = splitParser.getValue(1);
-        long nice = splitParser.getValue(2);
-        long system = splitParser.getValue(3);
-        long idleVal = splitParser.getValue(4);
-        long ioWait = splitParser.getValue(5);
-        long irq = splitParser.getValue(6);
-        long softIrq = splitParser.getValue(7);
-        long steal = splitParser.getValue(8);
-
-        long idleJ = idleVal + ioWait;
-        long nonIdle = user + nice + system + irq + softIrq + steal;
-        long total = idleJ + nonIdle;
-        long idle = idleVal + ioWait;
-
-        if (first) {
-            previousTotal = total;
-            previousIdle = idle;
-            first = false;
-            return 0;
-        }
-
-        long deltaTotal = total - previousTotal;
-        long deltaIdle  = idle - previousIdle;
-
-        previousTotal = total;
-        previousIdle = idle;
-
-        if (deltaTotal <= 0)
-            return 0;
-        return (int)((1f - (float)deltaIdle / (float)deltaTotal) * 100f);
-    }
-
-    /// Read CPU online state.
-    int readOnlineCount() {
-        String s = SampleWorker.readFirstLine("/sys/devices/system/cpu/online");
-        if (s == null)
-            return 0; // The Control Hub always supports this file, but phones might not
-
-        int count = 0;
-        int i = 0;
-        final int n = s.length();
-
-        while (i < n) {
-            // Parse first number:
-            int start = 0;
-            while (i < n && Character.isDigit(s.charAt(i))) {
-                start = start * 10 + (s.charAt(i) - '0');
-                i++;
-            }
-
-            int end = start;
-
-            // Check for range: '-'
-            if (i < n && s.charAt(i) == '-') {
-                i++; // skip '-'
-                end = 0;
-                while (i < n && Character.isDigit(s.charAt(i))) {
-                    end = end * 10 + (s.charAt(i) - '0');
-                    i++;
-                }
-            }
-
-            // Count CPUs in this segment:
-            count += (end - start + 1);
-
-            // Skip comma if present:
-            if (i < n && s.charAt(i) == ',') {
-                i++;
-            }
-        }
-
-        return count;
-    }
-
-    /// Read CPU temperature in Celsius centi-degrees.
-    int readTemperature() {
-        for (int i = 0; i < 10; i++) {
-            String s = SampleWorker.readFirstLine("/sys/class/thermal/thermal_zone" + i + "/temp");
-            if (s != null) {
-                return (int) SampleWorker.parseLong(s) / 10; // Milli-degrees to centi-degrees
-            }
-        }
-        return 0; // not found
-    }
-
-    /// Open the file specified by `path` and read the first line as an integer.
-    @SuppressWarnings("SameParameterValue")
-    static int readInt(String path) {
-        try {
-            String s = SampleWorker.readFirstLine(path);
-            return s == null ? 0 : (int) SampleWorker.parseLong(s.trim());
-        } catch (Exception e) {
-            return 0;
-        }
-    }
-}
-
-/// Sampler for storage and network bandwidth performance metrics.
-class BandwidthSampler {
-    long previousReadSectors = -1;
-    long previousWriteSectors = -1;
-    long previousRxBytes = -1;
-    long previousTxBytes = -1;
-
-    BandwidthSampler() {
-        Realtime.register("storage_reads", "Storage reads", "MB/s", false);
-        Realtime.register("storage_writes", "Storage writes", "MB/s", false);
-        Realtime.register("wifi_reads", "Wi-Fi reads", "MB/s", false);
-        Realtime.register("wifi_writes", "Wi-Fi writes", "MB/s", false);
-    }
-
-    /// Record of the data.
-    static class Record {
-        double storageReadMbps;
-        double storageWriteMbps;
-        double rxMbps;
-        double txMbps;
-
-        void post() {
-            Realtime.post("storage_reads", storageReadMbps);
-            Realtime.post("storage_writes", storageWriteMbps);
-            Realtime.post("wifi_reads", rxMbps);
-            Realtime.post("wifi_writes", txMbps);
-        }
-
-        void put(ByteBuffer chunk) {
-            chunk.putFloat((float) storageReadMbps);
-            chunk.putFloat((float) storageWriteMbps);
-            chunk.putFloat((float) rxMbps);
-            chunk.putFloat((float) txMbps);
-        }
-        static final int PUT_SIZE = 16;
-    }
-
-    /// Sample storage and network bandwidth.
-    Record sample(double inverseDeltaT) {
-        final int SECTOR_SIZE = 512;  // typical for eMMC
-        Record result = new Record();
-
-        // Read storage I/O statistics:
-        String line = SampleWorker.readFirstLine("/sys/block/mmcblk0/stat");
-        if (line != null) {
-            SplitParser splitParser = new SplitParser(line, 0);
-            long sectorsRead = splitParser.getValue(2);
-            long sectorsWritten = splitParser.getValue(6);
-
-            long storageReadDelta = sectorsRead - previousReadSectors;
-            long storageWriteDelta = sectorsWritten - previousWriteSectors;
-
-            previousReadSectors = sectorsRead;
-            previousWriteSectors = sectorsWritten;
-
-            result.storageReadMbps = (storageReadDelta * SECTOR_SIZE * inverseDeltaT) / 1_000_000.0;
-            result.storageWriteMbps = (storageWriteDelta * SECTOR_SIZE * inverseDeltaT) / 1_000_000.0;
-        }
-
-        // Read Wi-Fi I/O statistics:
-        line = SampleWorker.readFirstLine("/sys/class/net/wlan0/statistics/rx_bytes");
-        if (line != null) {
-            long rxBytes = SampleWorker.parseLong(line);
-            long rxDelta = rxBytes - previousRxBytes;
-            previousRxBytes = rxBytes;
-            result.rxMbps = (rxDelta * inverseDeltaT) / 1_000_000.0;
-        }
-        line = SampleWorker.readFirstLine("/sys/class/net/wlan0/statistics/tx_bytes");
-        if (line != null) {
-            long txBytes = SampleWorker.parseLong(line);
-            long txDelta = txBytes - previousTxBytes;
-            previousTxBytes = txBytes;
-            result.txMbps = (txDelta * inverseDeltaT) / 1_000_000.0;
-        }
-        return result;
-    }
-}
-
-/// Sampler for memory and thread count metrics.
-class MemoryAndThreadCountSampler {
-    MemoryAndThreadCountSampler() {
-        Realtime.register("vm_rss", "Vm Resident Set Size", "GB", false);
-        Realtime.register("mem_available", "Memory available", "GB", false);
-        Realtime.register("thread_count", "Thread count", "", true);
-    }
-
-    /// Record of the data.
-    static class Record {
-        long vmRSS; // Vm Resident Set Size (VmRSS), kB
-        long memAvailable; // kB
-        long threadCount;
-
-        void post() {
-            Realtime.post("vm_rss", vmRSS / 1024.0 / 1024.0);
-            Realtime.post("mem_available", memAvailable / 1024.0 / 1024.0);
-            Realtime.post("thread_count", threadCount);
-        }
-
-        void put(ByteBuffer chunk) {
-            chunk.putInt((int) vmRSS);
-            chunk.putInt((int) memAvailable);
-            chunk.put((byte) threadCount);
-        }
-        static final int PUT_SIZE = 9;
-    }
-
-    /// Sample memory used and available and thread count.
-    Record sample() {
-        Record result = new Record();
-        readVmRssAndThreadCount(result);
-        readMemAvailable(result);
-        return result;
-    }
-
-    /// Return the value in the string that follows the first occurrence of `valueName`.
-    long getValue(String s, String valueName) {
-        int i = s.indexOf(valueName);
-        if (i == -1)
-            return 0;
-        i += valueName.length();
-        while ((i < s.length()) && (!Character.isDigit(s.charAt(i))))
-            i++;
-        int j = i;
-        while ((j < s.length()) && (Character.isDigit(s.charAt(j))))
-            j++;
-        return (i != j) ? Long.parseLong(s.substring(i, j)) : 0;
-    }
-
-    /// Read Vm Resident Set Size (VmRSS) in kB as well as the current thread count.
-    void readVmRssAndThreadCount(Record record) {
-        String status = SampleWorker.readAll("/proc/self/status");
-        if (status == null)
-            return; // ====>
-        record.vmRSS = getValue(status, "VmRSS:");
-        record.threadCount = getValue(status, "Threads:");
-    }
-
-    /// Read memory available in kB, which is the best indicator of system pressure.
-    void readMemAvailable(Record record) {
-        String memInfo = SampleWorker.readAll("/proc/meminfo");
-        if (memInfo == null)
-            return; // ====>
-        long memFree = getValue(memInfo, "MemFree:");
-        long cached = getValue(memInfo, "Cached:");
-        long buffers = getValue(memInfo, "Buffers:");
-
-        // Approximation for older kernels like the Control Hub without MemAvailable:
-        record.memAvailable = memFree + cached + buffers;
-    }
-}
-
-/// Sampler for Sidekick metrics.
-class SidekickSampler {
-    int previousBytesWritten = 0;
-
-    /// Record of the data.
-    static class Record {
-        double writtenBytesPerSec; // Rate of additions to the archives
-        int pendingBytes; // Count of bytes queued but not yet written
-
-        void put(ByteBuffer chunk) {
-            chunk.putFloat((float) writtenBytesPerSec);
-            chunk.putInt(pendingBytes);
-        }
-        static final int PUT_SIZE = 8;
-    }
-
-    /// Sample Sidekick performance.
-    Record sample(double inverseDeltaT) {
-        Record record = new Record();
-        record.pendingBytes = FileWorker.bytesQueued - FileWorker.bytesWritten;
-        record.writtenBytesPerSec
-                = Math.max(0, (FileWorker.bytesWritten - previousBytesWritten) * inverseDeltaT);
-        previousBytesWritten = FileWorker.bytesWritten;
-        return record;
     }
 }
 
@@ -626,236 +245,20 @@ class DashboardSampler {
     }
 }
 
-/// Class to manage sampling of realtime counters where the sensor reads are slow and
-/// injected into the capture.
-class InjectedSampler {
-    // Name of the goBilda Floodgate sensor for measuring current draw of the entire robot:
-    final static String FLOODGATE_SENSOR = "floodgateSensor";
-
-    /// Class to track active counters.
-    static class Counter {
-        String id; // Counter ID
-        Supplier<Double> supplier; // Supplier of counter value
-        Counter(String id, Supplier<Double> supplier) {
-            this.id = id;
-            this.supplier = supplier;
-        }
-    }
-
-    ArrayList<Counter> potentialCounters = new ArrayList<>(); // All potential counters
-    ArrayList<Counter> activeCounters = new ArrayList<>(); // Active counters
-    int counterIndex; // We round-robin through the counters; this is the current counter index
-
-    /// Sample the next counter and record its value. May get called before [#prepareAndRegister].
-    void sample() {
-        // Wrap the counter index and check for a new active counter:
-        if (counterIndex >= activeCounters.size()) {
-            counterIndex = 0;
-            Set<String> activeCounterIds = Realtime.getSubscribedIds();
-            activeCounters.clear();
-            for (Counter counter: potentialCounters) {
-                if (activeCounterIds.contains(counter.id)) {
-                    activeCounters.add(counter);
-                }
-            }
-        }
-
-        if (!activeCounters.isEmpty()) {
-            // Sample the counter and advance for the next call. Note that there's no need
-            // to mark the device calls as 'bonus' - the app recognizes this worker thread.
-            Counter counter = activeCounters.get(counterIndex);
-            Realtime.post(counter.id, counter.supplier.get());
-            counterIndex++;
-        }
-    }
-
-    /// Get a list of all wrapped hardware devices and their names of the specified type without
-    /// recording the `hardwareMap.tryGet()` calls.
-    static class Device<T extends HardwareDevice> {
-        T device;
-        String name;
-        Device(T device, String name) { this.device = device; this.name = name; }
-    }
-    <T extends HardwareDevice> List<Device<T>> getDevices(HardwareMap hardwareMap, Class<? extends T> klass) {
-        List<Device<T>> list = new LinkedList<>();
-        Set<String> names = hardwareMap.getAllNames(klass);
-        for (String name: names) {
-            T device = Capture.unwrap(hardwareMap).tryGet(klass, name); // Use original to avoid recording tryGet()
-            if (device != null) {
-                if (hardwareMap instanceof Capture.SkHardwareMap) { // Wrap the device if necessary
-                    device = ((Capture.SkHardwareMap) hardwareMap).wrapDevice(device, name);
-                }
-                list.add(new Device<>(device, name));
-            }
-        }
-        return list;
-    }
-
-    /// Prepare and register counters for sampling. Should be called every time there's a new
-    /// opMode. `hardwareMap` will be [Capture.SkHardwareMap] if a user opMode, [HardwareMap]
-    /// if the default system opMode.
-    void prepareAndRegister(HardwareMap hardwareMap) {
-        // Reset in preparation for gathering values:
-        counterIndex = 0;
-        potentialCounters = new ArrayList<>();
-        String name;
-
-        for (Device<DcMotorEx> motor: getDevices(hardwareMap, DcMotorEx.class)) {
-            name = "motor." + motor.name + ".getCurrent";
-            potentialCounters.add(new Counter(name, () -> motor.device.getCurrent(CurrentUnit.AMPS)));
-            Realtime.register(name, "DcMotorEx " + motor.name + " current", "A", false);
-        }
-
-        for (Device<LynxModule> module: getDevices(hardwareMap, LynxModule.class)) {
-            name = "module." + module.name + ".getCurrent";
-            potentialCounters.add(new Counter(name, () -> module.device.getCurrent(CurrentUnit.AMPS)));
-            Realtime.register(name, module.name + " current", "A", false);
-
-            name = "module." + module.name + ".getGpioBusCurrent";
-            potentialCounters.add(new Counter(name, () -> module.device.getGpioBusCurrent(CurrentUnit.AMPS)));
-            Realtime.register(name, module.name + " GPIO bus current", "A", false);
-
-            name = "module." + module.name + ".getI2cBusCurrent";
-            potentialCounters.add(new Counter(name, () -> module.device.getI2cBusCurrent(CurrentUnit.AMPS)));
-            Realtime.register(name, module.name + " I2C bus current", "A", false);
-
-            name = "module." + module.name + ".getInputVoltage";
-            potentialCounters.add(new Counter(name, () -> module.device.getInputVoltage(VoltageUnit.VOLTS)));
-            Realtime.register(name, module.name + " battery voltage", "V", false);
-
-            name = "module." + module.name + ".getAuxiliaryVoltage";
-            potentialCounters.add(new Counter(name, () -> module.device.getAuxiliaryVoltage(VoltageUnit.VOLTS)));
-            Realtime.register(name, module.name + " auxiliary (5V) voltage", "V", false);
-
-            name = "module." + module.name + ".getTemperature";
-            potentialCounters.add(new Counter(name, () -> module.device.getTemperature(TempUnit.CELSIUS)));
-            Realtime.register(name, module.name + " temperature", "C", false);
-        }
-
-        for (Device<Limelight3A> limelight: getDevices(hardwareMap, Limelight3A.class)) {
-            // If multiple Limelight counters are active, it would be more optimal to aggregate
-            // their queries into a single getStatus() call.
-            name = "limelight." + limelight.name + ".getTemp";
-            potentialCounters.add(new Counter(name, () -> limelight.device.getStatus().getTemp()));
-            Realtime.register(name, "Limelight temperature", "C", false);
-
-            name = "limelight." + limelight.name + ".getFps";
-            potentialCounters.add(new Counter(name, () -> limelight.device.getStatus().getFps()));
-            Realtime.register(name, "Limelight FPS", "", false);
-
-            name = "limelight." + limelight.name + ".getCpu";
-            potentialCounters.add(new Counter(name, () -> limelight.device.getStatus().getCpu()));
-            Realtime.register(name, "Limelight CPU utilization", "%", true);
-        }
-
-        for (Device<AnalogInput> analogInput: getDevices(hardwareMap, AnalogInput.class)) {
-            if (analogInput.name.equals(FLOODGATE_SENSOR)) {
-                name = "analogInput." + analogInput.name + ".getVoltage";
-                // 3.3V on the sensor maps to 80A on V2 (we don't bother with V1's 60A because
-                // that has been recalled):
-                potentialCounters.add(new Counter(name, () -> analogInput.device.getVoltage() / 3.3 * 80.0));
-                Realtime.register(name, "Floodgate total robot current", "A", false);
-            }
-        }
-    }
-}
-
-/// Class to sample threads and process CPU usage.
-class ThreadSampler {
-    /// Get the current jiffy count for the process.
-    static int getProcessJiffies() {
-        return readJiffies("/proc/self/stat");
-    }
-
-    /// Get the current jiffy count for the specified Linux TID. Thread 0 doesn't exist.
-    static int getThreadJiffies(int tid) {
-        return (tid == 0) ? -1 : readJiffies("/proc/self/task/" + tid + "/stat");
-    }
-
-    /// Read the pseudo-file to get the current jiffy count. Return -1 if thread doesn't exist.
-    /// A jiffy is typically 10ms.
-    private static int readJiffies(String path) {
-        String contents = SampleWorker.readAll(path);
-        if (contents == null)
-            return -1;
-        int index = contents.lastIndexOf(')'); // Find the end of the name; it may have spaces
-        if (index < 0)
-            return 0;
-        SplitParser splitParser = new SplitParser(contents, index + 2);
-        long userTime = splitParser.getValue(11);
-        long systemTime = splitParser.getValue(12);
-
-        return (int) (userTime + systemTime);
-    }
-}
-
-/// Helper to parse space-delimited numbers in a string. This is a faster alternative
-/// to String.split() and Long.parseLong().
-class SplitParser {
-    String string; // String to parse
-    int offset; // Current index in the string
-    int index; // Most recent field index
-
-    SplitParser(String string, int offset) {
-        this.string = string;
-        this.offset = offset;
-    }
-
-    /// Get the value of the specified field. The fields must always be retrieved in order.
-    long getValue(int targetIndex) { // Zero-based count
-        int startOffset;
-        do {
-            // Skip leading spaces:
-            while (string.charAt(offset) == ' ') {
-                offset++;
-                if (offset >= string.length())
-                    return 0; // ====>
-            }
-
-            // Find the end of the field:
-            startOffset = offset;
-            while ((offset < string.length()) && (string.charAt(offset) != ' ')) {
-                offset++;
-            }
-            index++;
-        } while (index <= targetIndex); // Exit loop with index == targetIndex + 1 for next iteration
-
-        long value = 0;
-        for (int i = startOffset; i < offset; i++) {
-            char c = string.charAt(i);
-            if (!Character.isDigit(c)) {
-                return 0; // ====>
-            } else {
-                value = value * 10 + (c - '0');
-            }
-        }
-        return value;
-    }
-}
-
-/// Sidekick's thread for periodic sampling work.
+/// Sidekick's thread for periodic sampling work. Long-lived and survives opMode terminations.
 class SampleWorker {
     static final int WORK_QUANTUM = 50; // Check for work every 50ms
-    static final int REALTIME_UPDATE_PERIOD = 250; // Send realtime update to PC every quarter second
 
     int opModeCount; // Track the number of opModes we've processed
     OpMode opMode; // The current opMode
     String globalErrorMessage = ""; /// Last result from [RobotLog#getGlobalErrorMsg]
     String globalWarningMessage = ""; /// Last result from [RobotLog#getGlobalWarningMessage]
     boolean first = true; /// True if the first call to [#doWork]
-    double lastSystemSampleTime = 0; /// Time of last [#systemSample] call, in seconds
     DashboardSampler dashboardSampler = new DashboardSampler(); // Sample FTC Dashboard
-    CpuSampler cpuSampler = new CpuSampler(); // CPU stats
-    BandwidthSampler bandwidthSampler = new BandwidthSampler(); // Storage stats
-    MemoryAndThreadCountSampler memoryAndThreadCountSampler = new MemoryAndThreadCountSampler();
-    SidekickSampler sidekickSampler = new SidekickSampler(); // Sidekick stats
-    InjectedSampler injectedSampler = new InjectedSampler(); // Counters
-
-    PeriodTracker systemSamplePeriod = new PeriodTracker(250); // Sample system counters every quarter second
+    PeriodTracker counterSamplePeriod = new PeriodTracker(100); // Sample counters every 100ms
+    PeriodTracker counterUpdatePeriod = new PeriodTracker(200); // Update the PC every fifth of a second
     PeriodTracker dashboardSamplePeriod = new PeriodTracker(50); // Sample FTC Dashboard updates every 50ms
-    PeriodTracker injectedSamplePeriod = new PeriodTracker(50); // Inject a counter every 50ms
-    PeriodTracker realtimeUpdatePeriod = new PeriodTracker(REALTIME_UPDATE_PERIOD); // Updates to PC
-    PeriodTracker broadcastBatteryVoltagePeriod = new PeriodTracker(1111); // Broadcast voltage every second-ish
+    PeriodTracker broadcastBatteryVoltagePeriod = new PeriodTracker(500); // Broadcast voltage every half second
     PeriodTracker globalMessagePeriod = new PeriodTracker(500); // Check for global messages every 500ms
     ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable);
@@ -880,7 +283,7 @@ class SampleWorker {
     private void doWork() {
         if (first) {
             // This can only be called by the current thread:
-            Sidekick.instance.registerThreadStart(Sidekick.SAMPLE_WORKER_THREAD_NAME);
+            Sidekick.instance.beginThread(Sidekick.SAMPLE_WORKER_THREAD_NAME);
             first = false;
         }
         if (opModeCount != Sidekick.opModeCount) {
@@ -889,7 +292,19 @@ class SampleWorker {
             opModeCount = Sidekick.opModeCount;
             opMode = Sidekick.instance.eventLoop.getOpModeManager().getActiveOpMode();
             if (opMode != null) {
-                injectedSampler.prepareAndRegister(opMode.hardwareMap); // Either HardwareMap or SkHardwareMap
+                // Inform the counter logic:
+                Counters.instance.prepare(opMode.hardwareMap);
+
+                // Inform other components of the results:
+                Sidekick.instance.counters = Counters.instance.allCounters;
+                Realtime.setSupportedCounters(Counters.instance.allCounters);
+
+                // Now that the counters are prepared, record the values of some interesting ones
+                // if we're doing a capture:
+                if (Capture.instance != null) {
+                    List<CounterValue> counters = Counters.instance.collectInteresting(false);
+                    Capture.instance.recordCounterValues(counters);
+                }
             } else {
                 Sidekick.logE("SampleWorker: couldn't acquire HardwareMap");
             }
@@ -900,20 +315,17 @@ class SampleWorker {
         // is acquired and the capture is checked.
         Capture capture = Capture.instance;
         long currentNanoTime = System.nanoTime();
-        if (systemSamplePeriod.isDue(currentNanoTime)) {
-            systemSample(capture, currentNanoTime); // Robust to null captures
+        if (counterSamplePeriod.isDue(currentNanoTime)) {
+            sampleCounters(capture); // Robust to null captures
         }
-        if (injectedSamplePeriod.isDue(currentNanoTime)) {
-            injectedSampler.sample();
-        }
-        if (realtimeUpdatePeriod.isDue(currentNanoTime)) {
+        if (counterUpdatePeriod.isDue(currentNanoTime)) {
             Realtime.push();
         }
         if (broadcastBatteryVoltagePeriod.isDue(currentNanoTime)) {
             // If the system's default OpMode is currently running, we call getVoltage()
             // ourselves and save the result; when a user's OpMode is running, we piggyback
-            // off the voltage sensor reads that the system regularly does as well as
-            // explicit reads by the user's libraries or code.
+            // off the voltage sensor reads that the system regularly does (as well as any
+            // explicit reads by the user's libraries or code).
             if (opMode instanceof OpModeManagerImpl.DefaultOpMode) {
                 List<VoltageSensor> sensors = opMode.hardwareMap.getAll(VoltageSensor.class);
                 for (VoltageSensor sensor: sensors) {
@@ -943,7 +355,7 @@ class SampleWorker {
                     }
                 }
             }
-            // End the capture if the opMode has passed 120 seconds:
+            // End the capture if the opMode has passed the 120-second limit for TeleOp:
             if ((capture.startNanoTime != capture.initNanoTime) &&
                     ((currentNanoTime - capture.startNanoTime) > Capture.OP_MODE_TIME_LIMIT_NANOS) &&
                     !(capture.isEnded)) {
@@ -952,75 +364,22 @@ class SampleWorker {
         }
     }
 
-    /// Sample performance across system components: CPU, storage, memory, Sidekick.
-    void systemSample(@Nullable Capture capture, long currentNanoTime) {
-        double startTime = currentNanoTime * 1e-9; // Time in seconds
-        double inverseDeltaT = (lastSystemSampleTime != 0) ? 1.0 / (startTime - lastSystemSampleTime) : 0.0;
-        lastSystemSampleTime = startTime;
-
-        CpuSampler.Record cpuRecord = cpuSampler.sample();
-        BandwidthSampler.Record storageRecord = bandwidthSampler.sample(inverseDeltaT);
-        MemoryAndThreadCountSampler.Record memoryRecord = memoryAndThreadCountSampler.sample();
-        SidekickSampler.Record sidekickRecord = sidekickSampler.sample(inverseDeltaT);
-
-        short acquisitionTime = (short) ((System.nanoTime() * 1e-9 - startTime) * 1e6); // Microseconds
-
-        // Record samples into the capture:
-        if ((capture != null) && (!capture.isEnded)) {
-            capture.recordSamples(cpuRecord, storageRecord, memoryRecord, sidekickRecord, acquisitionTime);
+    /// Sample performance counters.
+    void sampleCounters(@Nullable Capture capture) {
+        if (Realtime.queryActiveCounterUpdate()) {
+            Counters.instance.updateActive(Realtime.getSubscription(), Sidekick.instance.userSetSamplers);
         }
 
-        // Post the sample values for real-time display in the app:
-        cpuRecord.post();
-        storageRecord.post();
-        memoryRecord.post();
-    }
+        // Collect the counters:
+        List<CounterValue> values = Counters.instance.queryActive();
 
-    /// Helper to open the file specified by `path` and read the first line as a string.
-    static String readFirstLine(String path) {
-        FileInputStream in = null;
-        try {
-            byte[] buffer = new byte[128]; // 128 bytes is plenty for one line
-            in = new FileInputStream(path);
-            int bytesRead = in.read(buffer);
-
-            // Find first newline if it exists, otherwise return the whole buffer. The buffer
-            // is ASCII so converting to a string is easy-peasy:
-            int end = 0;
-            while ((end < bytesRead) && (buffer[end] != '\n')) {
-                end++;
-            }
-            return new String(buffer, 0, end);
-        } catch (Exception e) {
-            return null; // ====>
-        } finally {
-            // Be sure to always close the file!
-            if (in != null) try { in.close(); } catch (Exception ignored) {}
+        // Record system samples into the capture:
+        if (capture != null) {
+            capture.recordCounterValues(values);
         }
-    }
 
-    /// Helper to open the file specified by `path` and read it entirely as a string.
-    static String readAll(String path) {
-        FileInputStream in = null;
-        try {
-            byte[] buffer = new byte[2048]; // System pseudo files are tiny; 2 kB is plenty
-            in = new FileInputStream(path);
-            int bytesRead = in.read(buffer);
-            return new String(buffer, 0, bytesRead);
-        } catch (Exception e) {
-            return null; // ====>
-        } finally {
-            // Be sure to always close the file!
-            if (in != null) try { in.close(); } catch (Exception ignored) {}
-        }
-    }
-
-    /// Helper to parse a string as a long.
-    static long parseLong(String s) {
-        try {
-            return Long.parseLong(s);
-        } catch (Exception e) {
-            return 0;
-        }
+        // Queue all sample values for real-time display at the PC (it's okay that we provide
+        // more IDs than were requested):
+        Realtime.queue(values);
     }
 }

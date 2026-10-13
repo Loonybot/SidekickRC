@@ -10,7 +10,6 @@ import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
 /**
  * Use this {@link Sk} class to configure Sidekick and add capture data.
  */
-@SuppressWarnings({"unused"})
 public class Sk {
     // Default value for Sk.beginNoMovement():
     public static final double DEFAULT_ROTATION_RATE_TOLERANCE = 1.0; // Degrees/s
@@ -49,7 +48,7 @@ public class Sk {
     ///        }
     /// You only need one copy of this code anywhere in your project. It will affect all of your
     /// opModes. Always BE VERY CAREFUL when changing code in any onCreate() method because, if
-    /// it crashes, your robot will continually reboot and you'll have to use the REV Hardware
+    /// it crashes, your robot will continually reboot, and you'll have to use the REV Hardware
     /// Client to reflash the system.
 
     /**
@@ -65,7 +64,7 @@ public class Sk {
 
     /**
      * Sidekick automatically captures data every time an opMode is run. This method allows
-     * you to specify how how long to keep that data before it's automatically deleted.
+     * you to specify how long to keep that data before it's automatically deleted.
      * Must be called from an @OnCreate method.
      *
      * @param days Delete Sidekick data from the robot after this many days.
@@ -116,6 +115,28 @@ public class Sk {
     public static <T> void registerSerializer(@NonNull T sample, @NonNull String format, @NonNull Serializer<T> serializer) {
         if (Sidekick.isEnabled) {
             Sidekick.instance.registerSerializer(sample, format, serializer);
+        }
+    }
+
+    /**
+     * Set the list of counters to be periodically sampled and recorded into the capture. By
+     * default, the current draws of all hubs are recorded, as well as the current draw of the
+     * main power rail if a goBilda Floodgate sensor is connected to an analog input and named
+     * "floodgateSensor". Counters are sampled every 100 ms and each sample can take up to
+     * 2 ms. The sampling is done from a thread that is different from the op mode thread, but
+     * the I/O acquires a lock within FTC's code that will block hardware device I/O operations
+     * of the main thread.
+     *
+     * @param ids Specify a list of counters to be sampled. The ID can be found in the graph
+     *            list of Sidekick's Central window. For example, the counter
+     *            "floodgateSensor.current" is the ID for the Floodgate current draw value.
+     *            If no IDs are specified, no counters will be automatically sampled (although
+     *            this can be overridden by enabling a graph in Sidekick's Central window).
+     * @see #getCounters(String...)
+     */
+    public static void setSamplers(String... ids) {
+        if (Sidekick.isEnabled) {
+            Sidekick.instance.setSamplers(ids);
         }
     }
 
@@ -228,9 +249,9 @@ public class Sk {
      *
      * @param threadName The name Sidekick will use to identify the thread.
      */
-    public static void registerThreadStart(@NonNull String threadName) {
+    public static void beginThread(@NonNull String threadName) {
         if (Sidekick.isEnabled) {
-            Sidekick.instance.registerThreadStart(threadName);
+            Sidekick.instance.beginThread(threadName);
         }
     }
 
@@ -238,9 +259,9 @@ public class Sk {
      * Call this if you can before your thread ends so that Sidekick can record how much CPU
      * it consumed.
      */
-    public static void registerThreadEnd() {
+    public static void endThread() {
         if (Sidekick.isEnabled) {
-            Sidekick.instance.registerThreadEnd();
+            Sidekick.instance.endThread();
         }
     }
 
@@ -303,4 +324,27 @@ public class Sk {
         return result;
     }
 
+    /**
+     * Query the specified counters. The results are recorded into the Sidekick capture so
+     * calling this can be useful even if your code doesn't look at the return values because
+     * it lets Sidekick sample at a different rate than setSamplers() does. It's better to make
+     * one call to this method with several IDs than to call this method several times because one
+     * (often computationally expensive) query to the hardware can often provide results for more
+     * than one counter.
+     *
+     * @param ids Specify a list of counters to be sampled. The ID can be found in the graph
+     *            list of Sidekick's Central window. For example, the counter
+     *            "system.temperature" is the temperature of the Robot Controller processor.
+     * @return An array of the values from the specified counters. A value will be null if the
+     *         requested counter doesn't exist. Temperatures are always in Celsius; other units
+     *         are the same as used by graphs in Sidekick's Central window.
+     * @see #setSamplers(String...)
+     */
+    public static Double[] getCounters(String... ids) {
+        Double[] result = {};
+        if (Capture.instance != null) {
+            result = Capture.instance.getCounters(ids);
+        }
+        return result;
+    }
 }
