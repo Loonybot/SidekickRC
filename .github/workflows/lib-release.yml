@@ -71,6 +71,57 @@ jobs:
         run: ./gradlew clean assembleRelease
 
       # ------------------------------
+      # Prepare release body (annotated tag message + static instructions)
+      # ------------------------------
+      - name: Prepare release body
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          TAG_MSG=$(git tag -l --format='%(contents)' "$TAG_NAME" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+          # If the tag has an annotation, prepend it as "What's Changed"
+          if [ -n "$TAG_MSG" ]; then
+            {
+              echo "### What's Changed"
+              echo ""
+              echo "$TAG_MSG"
+              echo ""
+              echo "---"
+              echo ""
+            } > release_notes.md
+          else
+            : > release_notes.md
+          fi
+
+          # Append the static JitPack & Gradle instructions
+          cat << EOF >> release_notes.md
+          Find your TeamCode **build.gradle** file. Beware that there may be multiple **build.gradle** files in your project--you want the one with a line that says \`project(':FtcRobotController')\`. Add the following line to the **dependencies** section:
+
+          \`\`\`
+          implementation 'com.github.Loonybot:SidekickRC:lib-v${VERSION}'
+          \`\`\`
+
+          In that same file, if you already have a **repositories** section but it doesn't include JitPack, add the following line inside that section:
+
+          \`\`\`
+          maven { url 'https://jitpack.io' }
+          \`\`\`
+
+          If you don't have a **repositories** section at all, you'll need to add it. Make sure it's on its own and not nested inside another section:
+
+          \`\`\`
+          repositories {
+              maven { url 'https://jitpack.io' }
+          }
+          \`\`\`
+
+          Don't forget to sync your project with the updated Gradle file by pressing the Elephant icon in the top-right corner.
+
+          You can usually ignore the assets below.
+          EOF
+
+      # ------------------------------
       # Upload AAR to GitHub Release (tag pushes only)
       # ------------------------------
       - name: Upload AAR to GitHub Release
@@ -79,30 +130,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: "Sidekick RC library v${{ env.VERSION }}"
-          body: |
-            Find your TeamCode **build.gradle** file. Beware that there may be multiple **build.gradle** files in your project--you want the one with a line that says `project(':FtcRobotController')`. Add the following line to the **dependencies** section:
-
-            ```
-            implementation 'com.github.Loonybot:SidekickRC:lib-v${{ env.VERSION }}'
-            ```
-            
-            In that same file, if you already have a **repositories** section but it doesn't include JitPack, add the following line inside that section:
-
-            ```
-            maven { url 'https://jitpack.io' }
-            ```
-            
-            If you don't have a **repositories** section at all, you'll need to add it. Make sure it's on its own and not nested inside another section:
-            
-            ```
-            repositories {
-                maven { url 'https://jitpack.io' }
-            }
-            ```
-            
-            Don't forget to sync your project with the updated Gradle file by pressing the Elephant icon in the top-right corner.  
-  
-            You can usually ignore the assets below.
+          body_path: release_notes.md
           files: |
             **/build/outputs/aar/*release.aar
 
