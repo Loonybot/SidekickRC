@@ -96,27 +96,13 @@ jobs:
 
           # Append the static JitPack & Gradle instructions
           cat << EOF >> release_notes.md
-          Find your TeamCode **build.gradle** file. Beware that there may be multiple **build.gradle** files in your project--you want the one with a line that says \`project(':FtcRobotController')\`. Add the following line to the **dependencies** section:
+          You'll need the following line in the dependencies section of your TeamCode **build.gradle** file. Beware that there may be multiple **build.gradle** files in your project.
 
           \`\`\`
           implementation 'com.github.Loonybot:SidekickRC:lib-v${VERSION}'
           \`\`\`
 
-          In that same file, if you already have a **repositories** section but it doesn't include JitPack, add the following line inside that section:
-
-          \`\`\`
-          maven { url 'https://jitpack.io' }
-          \`\`\`
-
-          If you don't have a **repositories** section at all, you'll need to add it. Make sure it's on its own and not nested inside another section:
-
-          \`\`\`
-          repositories {
-              maven { url 'https://jitpack.io' }
-          }
-          \`\`\`
-
-          Don't forget to sync your project with the updated Gradle file by pressing the Elephant icon in the top-right corner.
+          See [the Loonybot website](https://www.loonybot.com/sidekick-rc/installation/#1-install-the-library-if-someone-on-your-team-hasnt-already) for detailed instructions.
 
           You can usually ignore the assets below.
           EOF
