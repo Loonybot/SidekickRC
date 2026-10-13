@@ -731,7 +731,11 @@ class Capture {
                 "LIBRARY_VERSION", String.class, "1.2.3");
 
         String[] parts = versionString.split("\\.");
-        int major = Integer.parseInt(parts[0]);
+        if (parts.length != 3) {
+            Sidekick.logE("Invalid library version format: " + versionString);
+            return createVersion(0, 0, 0); 
+        }
+        int major = Integer.parseInt(parts[0].replaceAll("^[^0-9]+", "")); // Ignore "lib-v" text
         int minor = Integer.parseInt(parts[1]);
         int patch = Integer.parseInt(parts[2]);
         return createVersion(major, minor, patch);
