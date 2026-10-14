@@ -346,6 +346,7 @@ class ManifestJson {
 
     public boolean isBlocksOpMode = false; // True if recorded from BlocksOpMode
     public boolean isLinearOpMode = false; // True if LinearOpMode was used
+    public boolean usesPedroPathing = false; // True if Pedro Pathing is used
     public int[] suppressedIssues = new int[0]; // Array of issue codes to disable
     public LynxJson[] lynxes; // Lynx module information, indexed by LynxModuleInfo.id
     public int pinpointDeviceVersion = 0; // GoBilda Pinpoint device version; 0 if not present
@@ -1492,8 +1493,13 @@ class Capture {
                 hardwareMapDescriptors.put(methodName, dynamicDescriptor);
             }
             // There's only one HardwareMap so we don't need to specify an instance:
-            if (beginRecord(dynamicDescriptor.recordId, 3, nanoStartTime)) {
-                putInt24((int) ((nanoTime() - nanoStartTime) >> TICK_SHIFT));
+            long nanoEndTime = nanoTime();
+            if (beginRecord(dynamicDescriptor.recordId, 3, nanoEndTime)) {
+                long durationTicks = ((nanoEndTime - nanoStartTime) >> TICK_SHIFT);
+                if (durationTicks >= TICK_MASK) {
+                    durationTicks = TICK_MASK; // Saturate duration, effectively capping to 4 seconds
+                }
+                putInt24((int) durationTicks);
                 putString(classOrInterface.getSimpleName() + ".class");
                 putString(deviceName);
                 assertChunk();
@@ -1943,6 +1949,11 @@ class Capture {
         manifest.isLinearOpMode = opMode instanceof LinearOpMode;
         manifest.availableProcessors = Runtime.getRuntime().availableProcessors();
         manifest.freeStorageSpace = new StatFs(Sidekick.SD_CARD_PATH).getAvailableBytes();
+        manifest.usesPedroPathing = false;
+        try {
+            Class.forName("com.pedropathing.api.Paths");
+            manifest.usesPedroPathing = true;
+        } catch (ClassNotFoundException ignored) {}
 
         Class<? extends OpMode> klass = opMode.getClass();
         manifest.opModeClass = rootName(klass.getName());
@@ -3240,15 +3251,17 @@ class Capture {
         @Override public <T> T get(Class<? extends T> classOrInterface, String deviceName) {
             long nanoStartTime = nanoTime();
             T device = super.get(classOrInterface, deviceName); // Result is guaranteed non-null
+            device = wrapDevice(device, deviceName, classOrInterface);
             recordHardwareMapGet("get", nanoStartTime, classOrInterface, deviceName);
-            return wrapDevice(device, deviceName, classOrInterface);
+            return device;
         }
 
         @Override public HardwareDevice get(String deviceName) {
             long nanoStartTime = nanoTime();
             HardwareDevice device = super.get(deviceName); // Result is guaranteed non-null
+            device = wrapDevice(device, deviceName, HardwareDevice.class);
             recordHardwareMapGet("get", nanoStartTime, device.getClass(), deviceName);
-            return wrapDevice(device, deviceName, HardwareDevice.class);
+            return device;
         }
 
         @Override public @Nullable <T> T tryGet(Class<? extends T> classOrInterface, String deviceName) {
@@ -3257,8 +3270,9 @@ class Capture {
             if (device == null) {
                 return null;
             }
+            device = wrapDevice(device, deviceName, classOrInterface);
             recordHardwareMapGet("tryGet", nanoStartTime, classOrInterface, deviceName);
-            return wrapDevice(device, deviceName, classOrInterface);
+            return device;
         }
 
         @Override public @Nullable <T> T get(Class<? extends T> classOrInterface, SerialNumber serialNumber) {
@@ -3268,8 +3282,9 @@ class Capture {
                 return null;
             }
             String deviceName = SerialNumber.getDeviceDisplayName(serialNumber);
+            device = wrapDevice(device, deviceName, classOrInterface);
             recordHardwareMapGet("get", nanoStartTime, classOrInterface, deviceName);
-            return wrapDevice(device, deviceName, classOrInterface);
+            return device;
         }
 
         @Override public <T> List<T> getAll(Class<? extends T> classOrInterface) {
@@ -3284,8 +3299,8 @@ class Capture {
                 String name = !names.isEmpty() ? names.iterator().next() : "???";
 
                 // We cheesily return a record for each device found:
-                recordHardwareMapGet("getAll", nanoStartTime, classOrInterface, name);
                 result.add(wrapDevice(device, name, classOrInterface));
+                recordHardwareMapGet("getAll", nanoStartTime, classOrInterface, name);
 
                 // The first device record gets the actual duration; subsequent device records
                 // returned by the call appear with very little consumed time:

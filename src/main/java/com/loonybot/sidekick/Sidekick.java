@@ -447,11 +447,10 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
                         String message = "<h2>Sidekick Setting</h2>" + "Sidekick is currently " +
                             currentState;
                         if (isEnabled != nextBootEnabled) {
-                            message += ", but will be " + nextState + " on the next boot";
+                            message += ", but will be " + nextState + " on the next restart";
                         }
-                        message += ".\n\nPress <font color='#05BD05'>▶</font> to toggle it to " +
-                            toggleState + " on the next boot, or <font color='#C94F4F'>■</font> " +
-                            "to leave it as is.";
+                        message += ".\n\nPress ▶ to toggle it to " + toggleState + " on the next " +
+                                "restart, or ■ to leave it as is.";
 
                         telemetry.addLine(message);
                         telemetry.update();
