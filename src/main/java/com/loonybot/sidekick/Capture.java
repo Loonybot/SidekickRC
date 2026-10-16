@@ -35,6 +35,7 @@ import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.AnalogInput;
 import com.qualcomm.robotcore.hardware.AnalogInputController;
 import com.qualcomm.robotcore.hardware.CRServo;
+import com.qualcomm.robotcore.hardware.ColorSensor;
 import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorController;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
@@ -47,11 +48,17 @@ import com.qualcomm.robotcore.hardware.DistanceSensor;
 import com.qualcomm.robotcore.hardware.Gamepad;
 import com.qualcomm.robotcore.hardware.HardwareDevice;
 import com.qualcomm.robotcore.hardware.HardwareMap;
+import com.qualcomm.robotcore.hardware.I2cDevice;
+import com.qualcomm.robotcore.hardware.I2cDeviceSynch;
 import com.qualcomm.robotcore.hardware.IMU;
 import com.qualcomm.robotcore.hardware.LED;
 import com.qualcomm.robotcore.hardware.NormalizedColorSensor;
+import com.qualcomm.robotcore.hardware.OpticalDistanceSensor;
+import com.qualcomm.robotcore.hardware.PWMOutput;
 import com.qualcomm.robotcore.hardware.Servo;
 import com.qualcomm.robotcore.hardware.ServoController;
+import com.qualcomm.robotcore.hardware.TouchSensor;
+import com.qualcomm.robotcore.hardware.TouchSensorMultiplexer;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.hardware.configuration.annotations.AnalogSensorType;
 import com.qualcomm.robotcore.hardware.configuration.annotations.DigitalIoDeviceType;
@@ -72,6 +79,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryImpl;
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryInternal;
 import org.firstinspires.ftc.robotcore.internal.system.AppUtil;
+import org.firstinspires.inspection.InspectionState;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -343,23 +351,24 @@ class ManifestJson {
     public int pid = android.os.Process.myPid(); // Linux process ID of the FTC app
     public String deviceModel = android.os.Build.MODEL; // Model of the Robot Controller
     public int availableProcessors = Runtime.getRuntime().availableProcessors(); // Count of CPU cores
+    public long freeStorageSpace = new StatFs(Sidekick.SD_CARD_PATH).getAvailableBytes(); // Free space on the SD card, in bytes
 
-    public boolean isBlocksOpMode = false; // True if recorded from BlocksOpMode
-    public boolean isLinearOpMode = false; // True if LinearOpMode was used
-    public boolean usesPedroPathing = false; // True if Pedro Pathing is used
+    public boolean isBlocksOpMode; // True if recorded from BlocksOpMode
+    public boolean isLinearOpMode; // True if LinearOpMode was used
+    public boolean usesPedroPathing; // True if Pedro Pathing is used
+    public boolean isCompliantRobotName; // True if the Robot Controller name is compliant
     public int[] suppressedIssues = new int[0]; // Array of issue codes to disable
     public LynxJson[] lynxes; // Lynx module information, indexed by LynxModuleInfo.id
-    public int pinpointDeviceVersion = 0; // GoBilda Pinpoint device version; 0 if not present
-    public long initUnixTimeMs = 0; // Unix time when Init was pressed, in milliseconds
-    public long initNanoTime = 0; // Nano time when Init was pressed
-    public long startNanoTime = 0; // Nano time when Start was pressed
-    public long endNanoTime = 0; // Nano time when Stop was pressed
+    public int pinpointDeviceVersion; // GoBilda Pinpoint device version; 0 if not present
+    public long initUnixTimeMs; // Unix time when Init was pressed, in milliseconds
+    public long initNanoTime; // Nano time when Init was pressed
+    public long startNanoTime; // Nano time when Start was pressed
+    public long endNanoTime; // Nano time when Stop was pressed
     public String opModeName = ""; // "Group: Friendly name"
     public String opModeClass = ""; // "CompetitionTeleOp"
     public String appBuildTime = ""; // "2026-02-04T19:00:19.296-0800"
     public boolean[] gamepadIsPs4 = new boolean[2]; // False if gamepad is Xbox-compatible, true if PS4
-    public boolean isExcessive = false; // True if the accumulated capture size was truncated
-    public long freeStorageSpace = 0; // Free space on the SD card, in bytes
+    public boolean isExcessive; // True if the accumulated capture size was truncated
     public String[] limelightPipelines = new String[10]; // Limelight pipeline descriptors
 }
 
@@ -823,6 +832,7 @@ class Capture {
     HashMap<Thread, ThreadDescriptor> threadDescriptorMap = new HashMap<>(); // Map thread to descriptor
     LinkedList<ThreadDescriptor> threadDescriptorList = new LinkedList<>(); // List of all descriptors, zero is reserved
     HashMap<LynxModule, LynxModuleState> lynxModuleMap = new HashMap<>(); // Not all Lynx modules may be present
+    DynamicDescriptor voltageSensorDescriptor; // Lazily-created descriptor for the voltage sensor
     boolean majorError; // True if an error was recorded that will prevent the capture from loading
     int processJiffyStart; // The process's jiffy count at the start of the capture
     int processJiffyDuration; // The process's total jiffy count, determined at the end of the capture
@@ -1386,18 +1396,12 @@ class Capture {
     /// class as its canonical SDK name. For example, [DcMotorEx] objects are actually of type
     /// "[DcMotorImplEx]" which is internal ugliness, so substitute "DcMotorEx" instead.
     String getSdkName(Class<?> klass) {
-        // First, search through 'allDeviceMappings' for a matching type:
-        for (HardwareMap.DeviceMapping<?> deviceMapping: hardwareMap.allDeviceMappings) {
-            if (deviceMapping.getDeviceTypeClass().isAssignableFrom(klass)) {
-                return deviceMapping.getDeviceTypeClass().getName();
-            }
-        }
-
-        // The HardwareMap list isn't exhaustive so check a supplemental list:
         final Class<?>[] canonicalClasses = {IMU.class, VoltageSensor.class, CRServo.class, Servo.class,
-                DcMotor.class, NormalizedColorSensor.class, DistanceSensor.class, DigitalChannel.class,
-                WebcamName.class, AnalogInput.class, SparkFunOTOS.class, GoBildaPinpointDriver.class,
-                LED.class, Limelight3A.class};
+                DcMotorEx.class, DcMotorController.class, NormalizedColorSensor.class, ColorSensor.class,
+                DistanceSensor.class, DigitalChannel.class, WebcamName.class, AnalogInput.class,
+                SparkFunOTOS.class, GoBildaPinpointDriver.class, LED.class, Limelight3A.class,
+                ServoController.class, TouchSensor.class, TouchSensorMultiplexer.class,
+                OpticalDistanceSensor.class, PWMOutput.class, I2cDevice.class, I2cDeviceSynch.class};
         for (Class<?> canonicalClass: canonicalClasses) {
             if (canonicalClass.isAssignableFrom(klass))
                 return canonicalClass.getName();
@@ -1452,6 +1456,23 @@ class Capture {
         }
     }
 
+    /// Record the end positions of all DcMotorEx motors used. Dr. Roboto uses this to determine
+    /// if encoders are working.
+    void recordEndPositions() {
+        synchronized (sidekickLock) {
+            for (DeviceClassInfo deviceInfo : deviceClassArray) {
+                if (DcMotor.class.isAssignableFrom(deviceInfo.originalClass)) {
+                    for (HardwareDevice motorDevice : deviceInfo.proxyInstances) {
+                        DcMotor motor = (DcMotor) motorDevice;
+                        // We don't need to remember the result here because the call gets
+                        // automatically recorded into the capture:
+                        motor.getCurrentPosition();
+                    }
+                }
+            }
+        }
+    }
+
     /// Record and return the current values of the given counters.
     Double[] getCounters(String[] ids) {
         // Collect the counter values without holding a lock:
@@ -1483,8 +1504,8 @@ class Capture {
                 // We are recording a HardwareMap method so that's the type we specify here:
                 DeviceClassInfo classInfo = hardwareMap.registerDeviceClassInfo(HardwareMap.class);
                 if (classInfo.deviceNames.isEmpty()) {
-                    classInfo.deviceNames.add("HardwareMap");
-                    // Nothing added to 'proxyInstance' because HardwareMap.get() will never be called
+                    classInfo.deviceNames.add("hardwareMap");
+                    // Nothing added to 'proxyInstance' because hardwareMap.get() will never be called
                 }
                 // The 1st argument is a string that won't be shown with quotes, the 2nd argument
                 // is a string to be shown with quotes, and the return type is 'void':
@@ -1494,7 +1515,7 @@ class Capture {
             }
             // There's only one HardwareMap so we don't need to specify an instance:
             long nanoEndTime = nanoTime();
-            if (beginRecord(dynamicDescriptor.recordId, 3, nanoEndTime)) {
+            if (beginRecord(dynamicDescriptor.recordId, 3, nanoEndTime)) { // Yes, end time
                 long durationTicks = ((nanoEndTime - nanoStartTime) >> TICK_SHIFT);
                 if (durationTicks >= TICK_MASK) {
                     durationTicks = TICK_MASK; // Saturate duration, effectively capping to 4 seconds
@@ -1522,11 +1543,15 @@ class Capture {
             /// return this device:
             DeviceClassInfo deviceInfo = hardwareMap.registerDeviceClassInfo(originalSensor.getClass());
             int instance = deviceInfo.deviceNames.size();
+
             deviceInfo.deviceNames.add(sensorName);
             deviceInfo.proxyInstances.add(this); // Allow HardwareMap.get() to be called
-            SchemaKey schemaKey = new SchemaKey(new byte[]{ParamType.FLOAT});
-            DynamicDescriptor dynamicDescriptor = new DynamicDescriptor(deviceInfo, "getVoltage", schemaKey);
-            recordId = dynamicDescriptor.recordId + instance;
+
+            if (voltageSensorDescriptor == null) {
+                SchemaKey schemaKey = new SchemaKey(new byte[]{ParamType.FLOAT});
+                voltageSensorDescriptor = new DynamicDescriptor(deviceInfo, "getVoltage", schemaKey);
+            }
+            recordId = voltageSensorDescriptor.recordId + instance;
         }
 
         /// Get the voltage from the original and record the result.
@@ -1534,8 +1559,10 @@ class Capture {
             synchronized (sidekickLock) {
                 long nanoStartTime = nanoTime();
                 double voltage = originalSensor.getVoltage();
-                if (beginRecord(recordId, 7, nanoStartTime)) {
-                    putInt24((int) ((nanoTime() - nanoStartTime) >> TICK_SHIFT));
+                long nanoEndTime = nanoTime();
+                if (beginRecord(recordId, 7, nanoEndTime)) { // Yes, end time
+                    long durationTicks = ((nanoEndTime - nanoStartTime) >> TICK_SHIFT);
+                    putInt24((int) durationTicks);
                     chunk.putFloat((float) voltage);
                     assertChunk();
                 }
@@ -1935,6 +1962,26 @@ class Capture {
         }
     }
 
+    /// Return true if the fully specified class name is present.
+    boolean usesClass(@SuppressWarnings("SameParameterValue") String className) {
+        try {
+            Class.forName(className);
+            return true;
+        } catch (ClassNotFoundException ignored) {
+            return false;
+        }
+    }
+
+    /// Verify that the robot controller's name complies with R705. We process the name here so
+    /// we don't record the team name which would be considered Personally Identifiable Information.
+    boolean isCompliantRobotName() {
+        InspectionState inspection = new InspectionState();
+        inspection.initializeLocal();
+        String robotName = inspection.deviceName;
+        // The robot name must be of the form "<number>-RC" or "<number>-<letter>-RC".
+        return robotName.matches("\\d+-RC") || robotName.matches("\\d+-[A-Z]-RC");
+    }
+
     /// Serialize the metadata manifest.
     void serializeManifest() {
         manifest.initUnixTimeMs = initDate.getTime(); // Unix time in milliseconds
@@ -1947,13 +1994,8 @@ class Capture {
         manifest.appBuildTime = sidekick.appBuildTime;
         manifest.isBlocksOpMode = opMode instanceof BlocksOpMode;
         manifest.isLinearOpMode = opMode instanceof LinearOpMode;
-        manifest.availableProcessors = Runtime.getRuntime().availableProcessors();
-        manifest.freeStorageSpace = new StatFs(Sidekick.SD_CARD_PATH).getAvailableBytes();
-        manifest.usesPedroPathing = false;
-        try {
-            Class.forName("com.pedropathing.api.Paths");
-            manifest.usesPedroPathing = true;
-        } catch (ClassNotFoundException ignored) {}
+        manifest.isCompliantRobotName = isCompliantRobotName();
+        manifest.usesPedroPathing = usesClass("com.pedropathing.api.Path");
 
         Class<? extends OpMode> klass = opMode.getClass();
         manifest.opModeClass = rootName(klass.getName());
@@ -2115,10 +2157,11 @@ class Capture {
 
             long startMillis = System.currentTimeMillis(); // Time how long this function takes
 
-            // Record interesting counter values. The user didn't ask for these queries so mark
+            // Record interesting values. The user didn't ask for these queries so mark
             // them as bonus:
             markBonus(true);
             recordCounterValues(Counters.instance.collectInteresting(true));
+            recordEndPositions();
             markBonus(false);
 
             // Mark the end of the opMode and then stop screen and Limelight video recording:
@@ -3000,7 +3043,8 @@ class Capture {
 
             if (map != null) {
                 for (Map.Entry<String, VoltageSensor> entry : map.entrySet()) {
-                    entry.setValue(new SkVoltageSensor(this, entry.getValue(), entry.getKey()));
+                    entry.setValue(new SkVoltageSensor(this,
+                            unwrap(entry.getValue()), entry.getKey()));
                 }
             } else {
                 minorError("Voltage sensor");
@@ -3028,6 +3072,8 @@ class Capture {
                     deviceCount++;
                 }
             }
+            assert(!(HardwareDevice.class.isAssignableFrom(originalClass)) || (deviceCount > 0));
+            int maxInstances = Math.max(deviceCount, 1); // Always at least one instance
 
             // Determine the bus type from the device class:
             BusType busType = BusType.OTHER;
@@ -3048,7 +3094,7 @@ class Capture {
             classInfo.deviceId = deviceClassArray.size(); // Increment with every new ID
             classInfo.originalClass = originalClass;
             classInfo.busType = busType;
-            classInfo.maxInstances = Math.max(deviceCount, 1); // Always at least one instance
+            classInfo.maxInstances = maxInstances;
             classInfo.isBulkReader = DcMotor.class.isAssignableFrom(originalClass) ||
                     AnalogInput.class.isAssignableFrom(originalClass) ||
                     DigitalChannel.class.isAssignableFrom(originalClass);
@@ -3085,6 +3131,8 @@ class Capture {
         /// (or one of the Get variants). We use Byte Buddy to programmatically create a derived
         /// class with all public methods serializing their parameters and forwarding to the
         /// original delegate object to do the actual work.
+        ///
+        /// Do NOT hold sidekickLock when calling.
         <T> T wrapDevice(@NonNull T originalObject, @NonNull String deviceName,
                  @NonNull Class<? extends T> classOrInterface) {
             // Check for some early outs:

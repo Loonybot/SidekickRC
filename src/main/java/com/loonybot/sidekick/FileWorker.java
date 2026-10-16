@@ -543,7 +543,7 @@ class FileWorker {
                 saveOnlySystemLogcat(captureFileName);
             }
 
-            // Now delete all of the files in the Sidekick subdirectory that end in ".temporary":
+            // Now delete all the files in the Sidekick subdirectory that end in ".temporary":
             for (File file: fileList) {
                 if (file.getName().endsWith(WORKING_EXTENSION)) {
                     file.delete();

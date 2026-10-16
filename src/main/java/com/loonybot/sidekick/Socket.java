@@ -112,11 +112,11 @@ class Socket extends NanoWSD.WebSocket {
             array = new File[0];
         }
 
+        // Sort the list of files by lastModified():
+        Arrays.sort(array, Comparator.comparingLong(File::lastModified));
+
         // Convert from an array to a list:
         List<File> list = new LinkedList<>(Arrays.asList(array)); // Copy the list to modify it
-
-        // Sort by name:
-        list.sort(Comparator.comparing(File::getName));
 
         // Move a capture that starts with "1969" or "1970" from the top of the list to the
         // bottom, because our save code guarantees that it will be the newest:

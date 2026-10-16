@@ -423,6 +423,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// the next boot. This is the third notification method that the system calls on boot,
     /// after onCreateEventLoop.
     @OpModeRegistrar @SuppressWarnings("unused") public static void registerOpMode(OpModeManager manager) {
+        logI(">>> registerOpMode");
         // Don't enable the UI if the user has already called enable() or disable():
         if (apiRequestedState != ApiRequestedState.NOT_CALLED)
             return; // ====>
@@ -524,6 +525,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the user likely just pressed
     /// Init on their chosen opMode.
     @Override public void onOpModePreInit(OpMode opMode) {
+        logI(">>> onOpModePreInit");
         assert(isEnabled);
         synchronized(sidekickLock) {
             if (expectedNotification != OpModeNotification.PRE_INIT) {
@@ -563,6 +565,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the user has just pressed
     /// Start on the active opMode.
     @Override public void onOpModePreStart(OpMode opMode) {
+        logI(">>> onOpModePreStart");
         assert(isEnabled);
         synchronized(sidekickLock) {
             if (expectedNotification != OpModeNotification.PRE_START) {
@@ -580,6 +583,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the opMode is done, likely
     /// because the user has pressed Stop.
     @Override public void onOpModePostStop(OpMode opMode) {
+        logI(">>> onOpModePostStop");
         assert(isEnabled);
         synchronized(sidekickLock) {
             // The system sometimes calls onOpModePostStop() multiple times; we only act on the
