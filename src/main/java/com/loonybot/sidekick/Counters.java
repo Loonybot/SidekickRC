@@ -14,6 +14,7 @@ import com.qualcomm.robotcore.hardware.HardwareDevice;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 
+import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.CurrentUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.TempUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.VoltageUnit;
@@ -362,12 +363,15 @@ class Counters {
         }
     }
 
-    /// Counter for DcMotorEx current.
-    class MotorCurrentBundle extends DeviceBundle<DcMotorEx> {
-        MotorCurrentBundle(DeviceDescriptor<DcMotorEx> initialDescriptor) {
+    /// Counter for DcMotorEx state.
+    class MotorBundle extends DeviceBundle<DcMotorEx> {
+        MotorBundle(DeviceDescriptor<DcMotorEx> initialDescriptor) {
             super(initialDescriptor);
             register(descriptor.name + ".current", "Motor current draw", "A", false,
                     () -> descriptor.device.getCurrent(CurrentUnit.AMPS));
+            // Convert degrees/second to revolutions/minute.
+            register(descriptor.name + ".rpm", "Motor RPM (if encoder connected)", "RPM", true,
+                    () -> descriptor.device.getVelocity(AngleUnit.DEGREES) / 360.0 * 60.0);
         }
     }
 
@@ -756,7 +760,7 @@ class Counters {
                     }
                 }
                 for (DeviceDescriptor<DcMotorEx> motor : getDevices(unwrappedMap, DcMotorEx.class)) {
-                    deviceBundles.add(new MotorCurrentBundle(motor));
+                    deviceBundles.add(new MotorBundle(motor));
                 }
             } else {
                 // On subsequent prepare calls, we only recreate the device objects:
