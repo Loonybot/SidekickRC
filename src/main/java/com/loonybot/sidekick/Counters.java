@@ -273,7 +273,7 @@ class Counters {
     }
 
     /// Device counters derive from this.
-    class DeviceBundle<T extends HardwareDevice> extends CounterBundle {
+    abstract class DeviceBundle<T extends HardwareDevice> extends CounterBundle {
         DeviceDescriptor<T> descriptor;
         DeviceBundle(DeviceDescriptor<T> descriptor) {
             super(CounterType.DEVICE);
@@ -308,8 +308,8 @@ class Counters {
 
     /// Return counters for Lynx modules.
     class LynxBundle extends DeviceBundle<LynxModule> {
-        LynxBundle(DeviceDescriptor<LynxModule> descriptor) {
-            super(descriptor);
+        LynxBundle(DeviceDescriptor<LynxModule> initialDescriptor) {
+            super(initialDescriptor);
             register(descriptor.name + ".current", "Hub current", "A", false,
                     () -> descriptor.device.getCurrent(CurrentUnit.AMPS));
             register(descriptor.name + ".gpioBusCurrent", "Hub GPIO bus current", "A", false,
@@ -326,8 +326,8 @@ class Counters {
 
     /// Return counters for the voltage sensor.
     class VoltageBundle extends DeviceBundle<VoltageSensor> {
-        VoltageBundle(DeviceDescriptor<VoltageSensor> descriptor) {
-            super(descriptor);
+        VoltageBundle(DeviceDescriptor<VoltageSensor> initialDescriptor) {
+            super(initialDescriptor);
             register(descriptor.name + ".voltage", "Hub voltage", "V", false,
                     () -> descriptor.device.getVoltage());
         }
@@ -336,8 +336,8 @@ class Counters {
     /// Return counters for Limelight 3A.
     class LimelightBundle extends DeviceBundle<Limelight3A> {
         LLStatus status;
-        LimelightBundle(DeviceDescriptor<Limelight3A> descriptor) {
-            super(descriptor);
+        LimelightBundle(DeviceDescriptor<Limelight3A> initialDescriptor) {
+            super(initialDescriptor);
             register(descriptor.name + ".temperature", "Limelight temperature", "C", false,
                     this::setup, () -> status.getTemp());
             register(descriptor.name + ".frameTime", "Limelight frame time", "ms", false,
@@ -353,21 +353,21 @@ class Counters {
 
     /// Counter for the goBilda Floodgate sensor.
     class FloodgateBundle extends DeviceBundle<AnalogInput> {
-        FloodgateBundle(DeviceDescriptor<AnalogInput> floodgate) {
-            super(floodgate);
+        FloodgateBundle(DeviceDescriptor<AnalogInput> initialDescriptor) {
+            super(initialDescriptor);
             // 3.3V on the sensor maps to 80A on V2 (we don't bother with V1's 60A because
             // those have been recalled):
-            register(floodgate.name + ".current", "Current draw of main power rail", "A", false,
-                    () -> floodgate.device.getVoltage() / 3.3 * 80.0);
+            register(descriptor.name + ".current", "Current draw of main power rail", "A", false,
+                    () -> descriptor.device.getVoltage() / 3.3 * 80.0);
         }
     }
 
     /// Counter for DcMotorEx current.
     class MotorCurrentBundle extends DeviceBundle<DcMotorEx> {
-        MotorCurrentBundle(DeviceDescriptor<DcMotorEx> motor) {
-            super(motor);
-            register(motor.name + ".current", "Motor current draw", "A", false,
-                    () -> motor.device.getCurrent(CurrentUnit.AMPS));
+        MotorCurrentBundle(DeviceDescriptor<DcMotorEx> initialDescriptor) {
+            super(initialDescriptor);
+            register(descriptor.name + ".current", "Motor current draw", "A", false,
+                    () -> descriptor.device.getCurrent(CurrentUnit.AMPS));
         }
     }
 
@@ -736,36 +736,32 @@ class Counters {
     /// and allows us to construct the counter lists and initialize the hardware devices. The
     /// caller must hold appropriate locks. This should NOT be called while holding the Sidekick
     /// lock because it needs to create Byte Buddy proxies, which is extremely slow.
-    void prepare(HardwareMap hardwareMap) {
-        // Use the original unwrapped (non-proxied) HardwareMap to avoid having the interceptor
-        // record our calls:
-        hardwareMap = Capture.unwrap(hardwareMap);
-
+    void prepare(HardwareMap unwrappedMap) {
         synchronized (lock) {
             if (deviceBundles.isEmpty()) {
                 // On the first prepare call, register the device counters:
-                for (DeviceDescriptor<LynxModule> lynx : getDevices(hardwareMap, LynxModule.class)) {
+                for (DeviceDescriptor<LynxModule> lynx : getDevices(unwrappedMap, LynxModule.class)) {
                     lynxModuleNames.add(lynx.name);
                     deviceBundles.add(new LynxBundle(lynx));
                 }
-                for (DeviceDescriptor<VoltageSensor> voltage : getDevices(hardwareMap, VoltageSensor.class)) {
+                for (DeviceDescriptor<VoltageSensor> voltage : getDevices(unwrappedMap, VoltageSensor.class)) {
                     deviceBundles.add(new VoltageBundle(voltage));
                 }
-                for (DeviceDescriptor<Limelight3A> limelight : getDevices(hardwareMap, Limelight3A.class)) {
+                for (DeviceDescriptor<Limelight3A> limelight : getDevices(unwrappedMap, Limelight3A.class)) {
                     deviceBundles.add(new LimelightBundle(limelight));
                 }
-                for (DeviceDescriptor<AnalogInput> analog : getDevices(hardwareMap, AnalogInput.class)) {
+                for (DeviceDescriptor<AnalogInput> analog : getDevices(unwrappedMap, AnalogInput.class)) {
                     if (analog.name.equals(Sidekick.FLOODGATE_SENSOR)) {
                         deviceBundles.add(new FloodgateBundle(analog));
                     }
                 }
-                for (DeviceDescriptor<DcMotorEx> motor : getDevices(hardwareMap, DcMotorEx.class)) {
+                for (DeviceDescriptor<DcMotorEx> motor : getDevices(unwrappedMap, DcMotorEx.class)) {
                     deviceBundles.add(new MotorCurrentBundle(motor));
                 }
             } else {
                 // On subsequent prepare calls, we only recreate the device objects:
                 for (DeviceBundle<?> bundle : deviceBundles) {
-                    bundle.renew(hardwareMap);
+                    bundle.renew(unwrappedMap);
                 }
             }
             if (systemBundles.isEmpty()) {
@@ -802,12 +798,11 @@ class Counters {
             } else {
                 // If we haven't already called this setup routine, do so and add it to the set:
                 if (!setups.contains(setup)) {
-                    boolean success = setup.get(); // Invoke the setup
                     setups.add(setup);
 
-                    // If the setup was successful, add all the associated queries to the set
+                    // If the setup is successful, add all the associated queries to the set
                     // since their queries are basically free at this point:
-                    if (success) {
+                    if (setup.get()) {
                         List<CounterDescriptor> associatedCounters = countersBySetup.get(setup);
                         if (associatedCounters != null) {
                             counters.addAll(associatedCounters);

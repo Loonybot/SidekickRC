@@ -1972,8 +1972,9 @@ class Capture {
         }
     }
 
-    /// Verify that the robot controller's name complies with R705. We process the name here so
-    /// we don't record the team name which would be considered Personally Identifiable Information.
+    /// Verify that the robot controller's name complies with R705. We don't record the team
+    /// name but rather process it here to avoid Personally Identifiable Information in the
+    /// capture when submitting bug reports.
     boolean isCompliantRobotName() {
         InspectionState inspection = new InspectionState();
         inspection.initializeLocal();

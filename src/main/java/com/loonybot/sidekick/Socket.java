@@ -49,7 +49,6 @@ class Socket extends NanoWSD.WebSocket {
 
     public Socket(NanoHTTPD.IHTTPSession handshakeRequest) {
         super(handshakeRequest);
-        Sidekick.logI("Socket created!");
         synchronized(lock) {
             allSockets.add(this);
         }

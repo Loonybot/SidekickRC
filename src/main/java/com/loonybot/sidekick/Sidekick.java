@@ -339,15 +339,10 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         }
     }
 
-    /// Initialize Sidekick. This is the first method to be called at startup.
-    @OnCreate public static void onCreate(@SuppressWarnings("unused") Context context) {
-        logI(">>> onCreate #1");
-    }
-
     /// Register a listener so that we can hook opMode notifications. This is the second method
     /// the system calls, after onCreate.
-    @OnCreateEventLoop @SuppressWarnings("unused") public static void onCreateEventLoop(Context context, FtcEventLoop eventLoop) {
-        logI(">>> onCreateEventLoop #2");
+    @OnCreate public static void onCreate(Context context) {
+        logI(">>> onCreate #1");
         synchronized(sidekickLock) {
             // Load all our persisted state from the last boot (if it exists):
             String lastAppBuildTime = "";
@@ -358,10 +353,6 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
                 isEnabled = nextBootEnabled;
                 instance.lastRunNumber = Integer.parseInt(props.getProperty("runNumber", "0"));
                 lastAppBuildTime = props.getProperty("lastAppBuildTime", "");
-
-                logI("nextBootEnabled=%b", nextBootEnabled);
-                logI("runNumber=%d", instance.lastRunNumber);
-                logI("lastAppBuildTime=%s", lastAppBuildTime);
             } catch (IOException ignored) {}
 
             // If Sk.enable()/disable() has been called, that overrides our saved enable setting:
@@ -409,21 +400,25 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
             // Start the worker threads:
             instance.fileWorker = new FileWorker(instance.proxyBuilder);
             instance.sampleWorker = new SampleWorker();
-
-            // Register listeners for opMode notifications that come back to this Sidekick class:
-            eventLoop.getOpModeManager().registerListener(instance);
-
-            // Remember the OpModeManager for later:
-            instance.eventLoop = eventLoop;
             isInitialized = true;
         }
+    }
+
+    /// Initialize Sidekick. This is the first method to be called at startup.
+    @OnCreateEventLoop @SuppressWarnings("unused") public static void onCreateEventLoop(Context context, FtcEventLoop eventLoop) {
+        logI(">>> onCreateEventLoop #2");
+
+        // Register listeners for opMode notifications that come back to this Sidekick class:
+        eventLoop.getOpModeManager().registerListener(instance);
+
+        // Remember the OpModeManager for later:
+        instance.eventLoop = eventLoop;
     }
 
     /// Register a special opMode to provide a UI means of enabling or disabling Sidekick on
     /// the next boot. This is the third notification method that the system calls on boot,
     /// after onCreateEventLoop.
     @OpModeRegistrar @SuppressWarnings("unused") public static void registerOpMode(OpModeManager manager) {
-        logI(">>> registerOpMode");
         // Don't enable the UI if the user has already called enable() or disable():
         if (apiRequestedState != ApiRequestedState.NOT_CALLED)
             return; // ====>
@@ -525,7 +520,6 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the user likely just pressed
     /// Init on their chosen opMode.
     @Override public void onOpModePreInit(OpMode opMode) {
-        logI(">>> onOpModePreInit");
         assert(isEnabled);
         synchronized(sidekickLock) {
             if (expectedNotification != OpModeNotification.PRE_INIT) {
@@ -565,7 +559,6 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the user has just pressed
     /// Start on the active opMode.
     @Override public void onOpModePreStart(OpMode opMode) {
-        logI(">>> onOpModePreStart");
         assert(isEnabled);
         synchronized(sidekickLock) {
             if (expectedNotification != OpModeNotification.PRE_START) {
@@ -583,7 +576,6 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the opMode is done, likely
     /// because the user has pressed Stop.
     @Override public void onOpModePostStop(OpMode opMode) {
-        logI(">>> onOpModePostStop");
         assert(isEnabled);
         synchronized(sidekickLock) {
             // The system sometimes calls onOpModePostStop() multiple times; we only act on the

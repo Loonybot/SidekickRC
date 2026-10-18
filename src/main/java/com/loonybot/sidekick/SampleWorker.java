@@ -8,8 +8,10 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 
+import com.qualcomm.hardware.lynx.LynxModule;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.OpModeManagerImpl;
+import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.RobotLog;
 
@@ -251,6 +253,7 @@ class SampleWorker {
 
     int opModeCount; // Track the number of opModes we've processed
     OpMode opMode; // The current opMode
+    LynxModule canaryModule; // A Lynx module to determine if it's okay to sample devices
     String globalErrorMessage = ""; /// Last result from [RobotLog#getGlobalErrorMsg]
     String globalWarningMessage = ""; /// Last result from [RobotLog#getGlobalWarningMessage]
     boolean first = true; /// True if the first call to [#doWork]
@@ -292,10 +295,14 @@ class SampleWorker {
             opModeCount = Sidekick.opModeCount;
             opMode = Sidekick.instance.eventLoop.getOpModeManager().getActiveOpMode();
             if (opMode != null) {
-                // Inform the counter logic:
-                Counters.instance.prepare(opMode.hardwareMap);
+                // Get a new Lynx module using the new HardwareMap:
+                HardwareMap unwrappedMap = Capture.unwrap(opMode.hardwareMap);
+                canaryModule = unwrappedMap.getAll(LynxModule.class).get(0);
 
-                // Inform other components of the results:
+                // Prepare the counter logic:
+                Counters.instance.prepare(unwrappedMap);
+
+                // Inform other components of the results of the preparation:
                 Sidekick.instance.counters = Counters.instance.allCounters;
                 Realtime.setSupportedCounters(Counters.instance.allCounters);
 
@@ -321,7 +328,7 @@ class SampleWorker {
         if (counterUpdatePeriod.isDue(currentNanoTime)) {
             Realtime.push();
         }
-        if (broadcastBatteryVoltagePeriod.isDue(currentNanoTime)) {
+        if (broadcastBatteryVoltagePeriod.isDue(currentNanoTime) && okayToSample()) {
             // If the system's default OpMode is currently running, we call getVoltage()
             // ourselves and save the result; when a user's OpMode is running, we piggyback
             // off the voltage sensor reads that the system regularly does (as well as any
@@ -370,16 +377,27 @@ class SampleWorker {
             Counters.instance.updateActive(Realtime.getSubscription(), Sidekick.instance.userSetSamplers);
         }
 
-        // Collect the counters:
-        List<CounterValue> values = Counters.instance.queryActive();
+        if (okayToSample()) {
+            // Collect the counters:
+            List<CounterValue> values = Counters.instance.queryActive();
 
-        // Record system samples into the capture:
-        if (capture != null) {
-            capture.recordCounterValues(values);
+            // Record system samples into the capture:
+            if (capture != null) {
+                capture.recordCounterValues(values);
+            }
+
+            // Queue all sample values for real-time display at the PC (it's okay that we provide
+            // more IDs than were requested):
+            Realtime.queue(values);
         }
+    }
 
-        // Queue all sample values for real-time display at the PC (it's okay that we provide
-        // more IDs than were requested):
-        Realtime.queue(values);
+    /// Return 'true' if it's okay to use a hardware device to sample a counter. A scenario where
+    /// it's not permissible to sample counters is when exiting from 'Configure Devices'. Our
+    /// usage isn't atomic with respect to the system, but that's okay as the system device
+    /// calls themselves do their own check. However, our check is useful for avoiding Logcat
+    /// spew for 99.99% of the time.
+    boolean okayToSample() {
+        return (canaryModule != null) && (canaryModule.isOpen());
     }
 }
