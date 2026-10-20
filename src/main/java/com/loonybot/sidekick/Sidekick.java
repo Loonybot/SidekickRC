@@ -17,6 +17,7 @@ import com.qualcomm.robotcore.eventloop.opmode.OpModeManager;
 import com.qualcomm.robotcore.eventloop.opmode.OpModeManagerImpl;
 import com.qualcomm.robotcore.eventloop.opmode.OpModeManagerNotifier;
 import com.qualcomm.robotcore.eventloop.opmode.OpModeRegistrar;
+import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.robocol.Command;
 import com.qualcomm.robotcore.robocol.RobocolDatagram;
 
@@ -44,7 +45,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IllegalFormatException;
 import java.util.LinkedList;
-import java.util.List;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
@@ -68,7 +68,7 @@ class ReceiveLoopCallbacks implements RecvLoopRunnable.RecvLoopCallback {
     @Override public CallbackResult gamepadEvent(RobocolDatagram packet) {
         Capture capture = getCapture();
         if (capture != null) {
-            capture.gamepadData(packet.getData());
+            capture.recordGamepad(packet.getData());
         }
         return CallbackResult.NOT_HANDLED;
     }
@@ -124,7 +124,6 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     static boolean isInitialized = false; // True if Sidekick has been initialized
     static boolean isEnabled = true; // True if Sidekick has been enabled by the user
     static boolean nextBootEnabled = true; // True if Sidekick will be enabled on the next boot
-    static volatile int opModeCount; // Count of user-defined opModes initialized (includes default opModes)
     static CountDownLatch primingDoneSignal = new CountDownLatch(1); // Signals when the FileWorker primes are done
     int lastRunNumber; // Number of opModes run with the current build of the app
 
@@ -156,7 +155,6 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     BiFunction<Integer, Object, Object> emulatorCallback; // Emulator enlightenment callback, if any
     ProxyBuilder proxyBuilder; // Byte Buddy proxy builder
     String appBuildTime = ""; // Build time of the currently running app
-    List<CounterDescriptor> counters = new LinkedList<>(); // List of possible counters
     HashMap<Class<?>, SerializerInfo<?>> serializersMap = new HashMap<>(); // Map of serializers for custom types
     LinkedList<SerializerInfo<?>> serializersList = new LinkedList<>(); // List of all serializers
     Set<Integer> suppressedIssues = new HashSet<>(); // Issue codes that the user wants suppressed
@@ -521,6 +519,8 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     /// Init on their chosen opMode.
     @Override public void onOpModePreInit(OpMode opMode) {
         assert(isEnabled);
+        Capture capture = null; // Capture if running a user opMode; null otherwise
+        HardwareMap originalHardwareMap = opMode.hardwareMap;
         synchronized(sidekickLock) {
             if (expectedNotification != OpModeNotification.PRE_INIT) {
                 logE("onOpModePreInit() called when expecting %s", expectedNotification);
@@ -546,14 +546,12 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
                     primingDoneSignal.await();
                 } catch (InterruptedException ignored) {}
 
-                // Initialize the capture:
-                Capture.instance = new Capture(instance, opMode);
-                Capture.instance.initializeCapture(eventLoop.getOpModeManager(), isGamepadHooked);
+                // Create the capture:
+                capture = new Capture(instance, opMode, eventLoop.getOpModeManager(), isGamepadHooked);
             }
-
-            // Now that the new opMode is fully prepared, we can notify the worker thread:
-            opModeCount++;
         }
+        // Now that we're no longer holding the Sidekick lock, notify the sample worker:
+        sampleWorker.initializeNewOpMode(originalHardwareMap, capture);
     }
 
     /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the user has just pressed

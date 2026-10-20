@@ -788,7 +788,7 @@ class Capture {
             new DeviceChild(Servo.class, ServoController.class),
             new DeviceChild(CRServo.class, ServoController.class),
     };
-    final Object sidekickLock; // Master synchronization object, same lock object as Sidekick
+    final Object sidekickLock = Sidekick.sidekickLock; // Master synchronization object, same lock object as Sidekick
     final Charset UTF8 = StandardCharsets.UTF_8; // Our standard charset for strings
     final CharsetEncoder utf8Encoder = UTF8.newEncoder();
 
@@ -814,7 +814,6 @@ class Capture {
     long initUnixTime; // Unix time when Init was pressed, in milliseconds
     long startNanoTime; // Capture start time, in nanoseconds; same as init time if not started
     long startUnixTime; // Unix time when Start was pressed, in milliseconds
-    volatile boolean isStarted; // True if the opMode has started (Start was pressed)
     long endNanoTime; // Capture end time, in nanoseconds
     String dateAndTime; // Date and time at which the OpMode was initialized, used for file names
     Section[] sections; // Data on all capture sections
@@ -833,6 +832,7 @@ class Capture {
     LinkedList<ThreadDescriptor> threadDescriptorList = new LinkedList<>(); // List of all descriptors, zero is reserved
     HashMap<LynxModule, LynxModuleState> lynxModuleMap = new HashMap<>(); // Not all Lynx modules may be present
     DynamicDescriptor voltageSensorDescriptor; // Lazily-created descriptor for the voltage sensor
+    List<CounterDescriptor> allCounters; // List of all possible counters
     boolean majorError; // True if an error was recorded that will prevent the capture from loading
     int processJiffyStart; // The process's jiffy count at the start of the capture
     int processJiffyDuration; // The process's total jiffy count, determined at the end of the capture
@@ -871,11 +871,12 @@ class Capture {
     }
 
     /// The Capture's only constructor.
-    Capture(Sidekick sidekick, @NonNull OpMode opMode) {
+    Capture(Sidekick sidekick, @NonNull OpMode opMode, OpModeManagerImpl opModeManager, boolean isGamepadHooked) {
+        assert(Thread.holdsLock(sidekickLock));
+        instance = this;
+
         this.sidekick = sidekick;
         this.opMode = opMode;
-
-        this.sidekickLock = Sidekick.sidekickLock;
         this.currentThreadId = Thread.currentThread().getId();
         this.initDate = new Date();
         this.initNanoTime = nanoTime();
@@ -891,9 +892,8 @@ class Capture {
             this.sections[i] = new Section(0, 0);
         }
 
-        // Initialize the 0th entry of the thread descriptor list to be reserved:
-        threadDescriptorList.add(new ThreadDescriptor(0, "reserved", 0, 0, false));
-        snapshotThreadsAndJiffies(true);
+        // Do all the real initialization work:
+        initializeCapture(opModeManager, isGamepadHooked);
     }
 
     /// Register a new thread.
@@ -1142,7 +1142,6 @@ class Capture {
 
     /// Remember the time of the 'Start' button. We get notified by the event loop listener.
     void markStartTime() {
-        isStarted = true;
         startNanoTime = nanoTime();
         startUnixTime = System.currentTimeMillis();
         Sidekick.logI(LOGCAT_OP_MODE_START); /// This message syncs [#startNanoTime] with Unix time
@@ -1458,7 +1457,7 @@ class Capture {
 
     /// Record the end positions of all DcMotorEx motors used. Dr. Roboto uses this to determine
     /// if encoders are working.
-    void recordEndPositions() {
+    void recordMotorEndPositions() {
         synchronized (sidekickLock) {
             for (DeviceClassInfo deviceInfo : deviceClassArray) {
                 if (DcMotor.class.isAssignableFrom(deviceInfo.originalClass)) {
@@ -1498,6 +1497,7 @@ class Capture {
     /// Record that [HardwareMap#get] (or a permutation) was called. Produces records that get
     /// reconstructed in the pattern of: hardwareMap.tryGet(DcMotor.class, "frontLeftMotor")
     void recordHardwareMapGet(String methodName, long nanoStartTime, Class<?> classOrInterface, String deviceName) {
+        assert(!Thread.holdsLock(sidekickLock)); // Any get() is too long to hold the lock
         synchronized (sidekickLock) {
             DynamicDescriptor dynamicDescriptor = hardwareMapDescriptors.get(methodName);
             if (dynamicDescriptor == null) {
@@ -1777,8 +1777,8 @@ class Capture {
         if ((chunkRemaining -= 6) < 0)
             nextChunk();
         chunk.putInt(Signature.COUNTER_DESCRIPTORS);
-        chunk.putShort((short) sidekick.counters.size());
-        for (CounterDescriptor counter : sidekick.counters) {
+        chunk.putShort((short) allCounters.size());
+        for (CounterDescriptor counter : allCounters) {
             if ((chunkRemaining -= 1) < 0) {
                 nextChunk();
             }
@@ -2122,6 +2122,10 @@ class Capture {
             minorError("Gamepad");
         }
 
+        // Initialize the 0th entry of the thread descriptor list to be reserved:
+        threadDescriptorList.add(new ThreadDescriptor(0, "reserved", 0, 0, false));
+        snapshotThreadsAndJiffies(true);
+
         // Initialize the file and allocate a chunk for capturing, write the file header, and
         // initialize the archive section:
         sidekick.fileWorker.submit(new FileWorker.OpenMessage(dateAndTime));
@@ -2161,8 +2165,8 @@ class Capture {
             // Record interesting values. The user didn't ask for these queries so mark
             // them as bonus:
             markBonus(true);
-            recordCounterValues(Counters.instance.collectInteresting(true));
-            recordEndPositions();
+            recordCounterValues(Counters.instance.queryInterestingCounters(true));
+            recordMotorEndPositions();
             markBonus(false);
 
             // Mark the end of the opMode and then stop screen and Limelight video recording:
@@ -2262,7 +2266,7 @@ class Capture {
     }
 
     /// Add data from a gamepad input packet to the capture, modeled off [EventLoopManager#gamepadEvent].
-    void gamepadData(byte[] input) {
+    void recordGamepad(byte[] input) {
         final int GAMEPAD_FLOAT_COUNT = 6; // Gamepad data always has 6 floats
 
         synchronized (sidekickLock) {
@@ -3136,10 +3140,6 @@ class Capture {
         /// Do NOT hold sidekickLock when calling.
         <T> T wrapDevice(@NonNull T originalObject, @NonNull String deviceName,
                  @NonNull Class<? extends T> classOrInterface) {
-            // Check for some early outs:
-            if (isStarted) {
-                return originalObject; // ====> Don't wrap after Start is pressed; it takes too long!
-            }
             if (originalObject instanceof SidekickProxy) {
                 return originalObject; // ====> The object is already wrapped!
             }
@@ -3166,6 +3166,8 @@ class Capture {
                 }
             }
 
+            T proxyInstance; // Proxy instance to be created
+            Limelight3A originalLimelight = null; // Original instance if proxying a Limelight
             synchronized(sidekickLock) {
                 DeviceClassInfo classInfo = registerDeviceClassInfo(originalClass);
 
@@ -3186,7 +3188,7 @@ class Capture {
                 // Create the context for this particular device instance, then instantiate:
                 Interceptor.Context context = new Interceptor.Context(this.capture, originalObject,
                         classInfo, 0, instanceId);
-                T proxyInstance = instantiateProxy(proxyClass, context, originalObject);
+                proxyInstance = instantiateProxy(proxyClass, context, originalObject);
                 if (proxyInstance == null) {
                     minorError("Proxy class");
                     return originalObject; // ====>
@@ -3209,7 +3211,7 @@ class Capture {
                 }
 
                 // Do some extra processing for the first Limelight instance we see.
-                if ((classInfo.isLimelight) && (instanceId == 0)) {
+                if ((originalObject instanceof Limelight3A) && (instanceId == 0)) {
                     // Stash the IP address for video capture at Start:
                     InetAddress inetAddress = Sidekick.getInstanceField(originalObject, "inetAddress", InetAddress.class);
                     if (inetAddress != null) {
@@ -3217,28 +3219,33 @@ class Capture {
                     } else {
                         minorError("Limelight IP address");
                     }
-
-                    if (originalObject instanceof Limelight3A) {
-                        long startMillis = System.currentTimeMillis();
-                        Limelight3A limelight = (Limelight3A) originalObject;
-                        try {
-                            Method getPipelineMethod = Limelight3A.class.getDeclaredMethod("getPipelineAtIndex", int.class);
-                            getPipelineMethod.setAccessible(true);
-                            for (int i = 0; i < 10; i++) {
-                                JSONObject pipeline = (JSONObject) getPipelineMethod.invoke(limelight, i);
-                                if (pipeline != null) {
-                                    manifest.limelightPipelines[i] = pipeline.toString();
-                                }
-                            }
-                        } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException ignored) {
-                            minorError("Couldn't access Limelight pipeline");
-                        }
-                        long endMillis = System.currentTimeMillis();
-                        Sidekick.logI("Took %d millis", (int) (endMillis - startMillis));
-                    }
+                    originalLimelight = (Limelight3A) originalObject;
                 }
-                return proxyInstance;
             }
+
+            // Now that we're no longer holding the Sidekick lock, check to see if we should
+            // make Limelight calls:
+            if (originalLimelight != null) {
+                long startMillis = System.currentTimeMillis();
+                Limelight3A limelight = (Limelight3A) originalObject;
+                try {
+                    Method getPipelineMethod = Limelight3A.class.getDeclaredMethod("getPipelineAtIndex", int.class);
+                    getPipelineMethod.setAccessible(true);
+                    for (int i = 0; i < 10; i++) {
+                        JSONObject pipeline = (JSONObject) getPipelineMethod.invoke(limelight, i);
+                        if (pipeline != null) {
+                            // Note that we're updating this without holding the Sidekick lock:
+                            manifest.limelightPipelines[i] = pipeline.toString();
+                        }
+                    }
+                } catch (NoSuchMethodException | IllegalAccessException |
+                         InvocationTargetException ignored) {
+                    minorError("Couldn't access Limelight pipeline");
+                }
+                long endMillis = System.currentTimeMillis();
+                Sidekick.logI("Limelight initialization took %d millis", endMillis - startMillis);
+            }
+            return proxyInstance;
         }
 
         /// Wrap a select class returned from a wrapped [HardwareDevice] object.

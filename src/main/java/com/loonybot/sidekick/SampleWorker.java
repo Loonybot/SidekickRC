@@ -6,11 +6,7 @@ package com.loonybot.sidekick;
 import android.annotation.SuppressLint;
 import android.util.Log;
 
-import androidx.annotation.Nullable;
-
 import com.qualcomm.hardware.lynx.LynxModule;
-import com.qualcomm.robotcore.eventloop.opmode.OpMode;
-import com.qualcomm.robotcore.eventloop.opmode.OpModeManagerImpl;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.RobotLog;
@@ -30,7 +26,7 @@ import java.util.concurrent.TimeUnit;
 /// Values repository for realtime counters. Non-instanced and only has static methods.
 /// This is the interface between the Sockets and Sampling logic.
 class Realtime {
-    static final Object lock = new Object(); // Lock for the realtime repository
+    static final Object realtimeLock = new Object(); // Lock for the realtime repository
     static List<CounterDescriptor> supportedCounters = new ArrayList<>(); // List of supported realtime counters>
     static HashMap<Socket, Set<String>> subscriptions = new HashMap<>(); // List of subscribed counter IDs by socket
     static HashMap<String, List<Float>> counterValues = new HashMap<>(); // List of accumulated values for each counter
@@ -51,7 +47,7 @@ class Realtime {
 
     /// Update the list of realtime counters subscribed by the specified socket.
     static void updateSubscription(Socket socket, String[] counterIds) {
-        synchronized (lock) {
+        synchronized (realtimeLock) {
             // Add or remove this socket from the realtime subscriber list, as necessary:
             if (counterIds.length == 0) {
                 subscriptions.remove(socket);
@@ -86,7 +82,7 @@ class Realtime {
 
     /// Get the list of realtime counters subscribed by all sockets. Thread safe.
     static Set<String> getSubscription() {
-        synchronized (lock) {
+        synchronized (realtimeLock) {
             // Make a copy of the values for thread safety:
             return new HashSet<>(counterValues.keySet());
         }
@@ -95,7 +91,7 @@ class Realtime {
     /// Return true if the list of active counters needs to be updated. This might be
     /// because a socket asked for new counters, or because the user called Sk.setSamplers().
     static boolean queryActiveCounterUpdate() {
-        synchronized (lock) {
+        synchronized (realtimeLock) {
             boolean needsUpdate = queryUniqueness != updateUniqueness;
             queryUniqueness = updateUniqueness;
             return needsUpdate;
@@ -104,7 +100,7 @@ class Realtime {
 
     /// Mark that the list of counters has changed. Thread safe.
     static void forceActiveCounterUpdate() {
-        synchronized (lock) {
+        synchronized (realtimeLock) {
             updateUniqueness++;
         }
     }
@@ -125,7 +121,7 @@ class Realtime {
 
     /// Push the accumulated realtime counters to all subscribed sockets.
     static void push() {
-        synchronized(lock) {
+        synchronized(realtimeLock) {
             // Send the realtime values to subscribed sockets:
             for (Socket socket: subscriptions.keySet()) {
                 Set<String> counters = subscriptions.get(socket);
@@ -204,7 +200,7 @@ class DashboardSampler {
             } catch (ClassNotFoundException | NoSuchFieldException | IllegalAccessException e) {
                 // Disable FTC telemetry capture and note the error:
                 pendingTelemetry = null;
-                Capture.instance.minorError("FTC Dashboard field overlay");
+                Sidekick.logE("Couldn't get FTC Dashboard field overlay");
             }
         }
         return pendingTelemetry;
@@ -250,10 +246,11 @@ class DashboardSampler {
 /// Sidekick's thread for periodic sampling work. Long-lived and survives opMode terminations.
 class SampleWorker {
     static final int WORK_QUANTUM = 50; // Check for work every 50ms
+    static final Object sampleWorkerLock = new Object(); // Lock for the sample worker
 
-    int opModeCount; // Track the number of opModes we've processed
-    OpMode opMode; // The current opMode
+    Capture capture; // If non-null, the capture being recorded
     LynxModule canaryModule; // A Lynx module to determine if it's okay to sample devices
+    List<VoltageSensor> defaultOpModeVoltageSensors; // If non-null, voltage sensors to use when running default opMode
     String globalErrorMessage = ""; /// Last result from [RobotLog#getGlobalErrorMsg]
     String globalWarningMessage = ""; /// Last result from [RobotLog#getGlobalWarningMessage]
     boolean first = true; /// True if the first call to [#doWork]
@@ -284,95 +281,65 @@ class SampleWorker {
 
     /// The sample worker thread's primary loop. Called at a period of [#WORK_QUANTUM].
     private void doWork() {
-        if (first) {
-            // This can only be called by the current thread:
-            Sidekick.instance.beginThread(Sidekick.SAMPLE_WORKER_THREAD_NAME);
-            first = false;
-        }
-        if (opModeCount != Sidekick.opModeCount) {
-            // Whenever there's a new opMode, we query the hardware map for new hardware objects
-            // and register counters for real-time sampling:
-            opModeCount = Sidekick.opModeCount;
-            opMode = Sidekick.instance.eventLoop.getOpModeManager().getActiveOpMode();
-            if (opMode != null) {
-                // Get a new Lynx module using the new HardwareMap:
-                HardwareMap unwrappedMap = Capture.unwrap(opMode.hardwareMap);
-                canaryModule = unwrappedMap.getAll(LynxModule.class).get(0);
-
-                // Prepare the counter logic:
-                Counters.instance.prepare(unwrappedMap);
-
-                // Inform other components of the results of the preparation:
-                Sidekick.instance.counters = Counters.instance.allCounters;
-                Realtime.setSupportedCounters(Counters.instance.allCounters);
-
-                // Now that the counters are prepared, record the values of some interesting ones
-                // if we're doing a capture:
-                if (Capture.instance != null) {
-                    List<CounterValue> counters = Counters.instance.collectInteresting(false);
-                    Capture.instance.recordCounterValues(counters);
-                }
-            } else {
-                Sidekick.logE("SampleWorker: couldn't acquire HardwareMap");
+        synchronized(sampleWorkerLock) {
+            if (first) {
+                // This can only be called by the current thread:
+                Sidekick.instance.beginThread(Sidekick.SAMPLE_WORKER_THREAD_NAME);
+                first = false;
             }
-        }
 
-        // To minimize contention, we do NOT acquire the Sidekick lock here. Rather,
-        // once data has been collected to record into the capture, THAT'S when the lock
-        // is acquired and the capture is checked.
-        Capture capture = Capture.instance;
-        long currentNanoTime = System.nanoTime();
-        if (counterSamplePeriod.isDue(currentNanoTime)) {
-            sampleCounters(capture); // Robust to null captures
-        }
-        if (counterUpdatePeriod.isDue(currentNanoTime)) {
-            Realtime.push();
-        }
-        if (broadcastBatteryVoltagePeriod.isDue(currentNanoTime) && okayToSample()) {
-            // If the system's default OpMode is currently running, we call getVoltage()
-            // ourselves and save the result; when a user's OpMode is running, we piggyback
-            // off the voltage sensor reads that the system regularly does (as well as any
-            // explicit reads by the user's libraries or code).
-            if (opMode instanceof OpModeManagerImpl.DefaultOpMode) {
-                List<VoltageSensor> sensors = opMode.hardwareMap.getAll(VoltageSensor.class);
-                for (VoltageSensor sensor: sensors) {
-                    Capture.saveBatteryVoltage(sensor.getVoltage());
-                }
+            long currentNanoTime = System.nanoTime();
+            if (counterSamplePeriod.isDue(currentNanoTime)) {
+                sampleCounters();
             }
-            Socket.broadcastBatteryVoltage();
-        }
-        // We require captures to be active for the following:
-        if ((capture != null) && (!capture.isEnded)) {
-            if (dashboardSamplePeriod.isDue(currentNanoTime)) {
-                dashboardSampler.sample(capture);
+            if (counterUpdatePeriod.isDue(currentNanoTime)) {
+                Realtime.push();
             }
-            if (globalMessagePeriod.isDue(currentNanoTime)) {
-                if (RobotLog.hasGlobalErrorMsg()) {
-                    String message = RobotLog.getGlobalErrorMsg();
-                    if (!message.equals(globalErrorMessage)) {
-                        globalErrorMessage = message;
-                        capture.recordGlobalMessage(true, globalErrorMessage);
+            if (broadcastBatteryVoltagePeriod.isDue(currentNanoTime) && okayToSample()) {
+                // If the system's default OpMode is currently running, we call getVoltage()
+                // ourselves and save the result; when a user's OpMode is running, we piggyback
+                // off the voltage sensor reads that the system regularly does (as well as any
+                // explicit reads by the user's libraries or code).
+                if (defaultOpModeVoltageSensors != null) {
+                    for (VoltageSensor sensor : defaultOpModeVoltageSensors) {
+                        Capture.saveBatteryVoltage(sensor.getVoltage());
                     }
                 }
-                if (RobotLog.hasGlobalWarningMsg()) {
-                    String message = RobotLog.getGlobalWarningMessage().message;
-                    if (!message.equals(globalWarningMessage)) {
-                        globalWarningMessage = message;
-                        capture.recordGlobalMessage(false, globalWarningMessage);
+                Socket.broadcastBatteryVoltage();
+            }
+            // We require captures to be active for the following:
+            if ((capture != null) && (!capture.isEnded)) {
+                if (dashboardSamplePeriod.isDue(currentNanoTime)) {
+                    dashboardSampler.sample(capture);
+                }
+                if (globalMessagePeriod.isDue(currentNanoTime)) {
+                    if (RobotLog.hasGlobalErrorMsg()) {
+                        String message = RobotLog.getGlobalErrorMsg();
+                        if (!message.equals(globalErrorMessage)) {
+                            globalErrorMessage = message;
+                            capture.recordGlobalMessage(true, globalErrorMessage);
+                        }
+                    }
+                    if (RobotLog.hasGlobalWarningMsg()) {
+                        String message = RobotLog.getGlobalWarningMessage().message;
+                        if (!message.equals(globalWarningMessage)) {
+                            globalWarningMessage = message;
+                            capture.recordGlobalMessage(false, globalWarningMessage);
+                        }
                     }
                 }
-            }
-            // End the capture if the opMode has passed the 120-second limit for TeleOp:
-            if ((capture.startNanoTime != capture.initNanoTime) &&
-                    ((currentNanoTime - capture.startNanoTime) > Capture.OP_MODE_TIME_LIMIT_NANOS) &&
-                    !(capture.isEnded)) {
-                capture.endCapture(Capture.LOGCAT_OP_MODE_TIME_LIMIT);
+                // End the capture if the opMode has passed the 120-second limit for TeleOp:
+                if ((capture.startNanoTime != capture.initNanoTime) &&
+                        ((currentNanoTime - capture.startNanoTime) > Capture.OP_MODE_TIME_LIMIT_NANOS) &&
+                        !(capture.isEnded)) {
+                    capture.endCapture(Capture.LOGCAT_OP_MODE_TIME_LIMIT);
+                }
             }
         }
     }
 
     /// Sample performance counters.
-    void sampleCounters(@Nullable Capture capture) {
+    void sampleCounters() {
         if (Realtime.queryActiveCounterUpdate()) {
             Counters.instance.updateActive(Realtime.getSubscription(), Sidekick.instance.userSetSamplers);
         }
@@ -399,5 +366,38 @@ class SampleWorker {
     /// spew for 99.99% of the time.
     boolean okayToSample() {
         return (canaryModule != null) && (canaryModule.isOpen());
+    }
+
+    /// Lazily initialize for a new opMode. 'capture' is null when running a default opMode.
+    /// Do NOT call this while holding the Sidekick lock as that can create deadlocks - we
+    /// often need to call capture code while holding the sampler worker lock.
+    void initializeNewOpMode(HardwareMap unwrappedMap, Capture newCapture) {
+        assert(!Thread.holdsLock(Sidekick.sidekickLock));
+        synchronized(sampleWorkerLock) {
+            capture = newCapture;
+
+            // Get a new Lynx module using the new HardwareMap:
+            canaryModule = unwrappedMap.getAll(LynxModule.class).get(0);
+
+            // Prepare the counter logic:
+            List<CounterDescriptor> allCounters = Counters.instance.prepare(unwrappedMap);
+
+            // Inform other components of the results of the preparation:
+            Realtime.setSupportedCounters(allCounters);
+
+            if (capture == null) {
+                // When the default opMode is running, we can't rely on the hooked SkVoltageSensor
+                // to monitor the voltage so hook them directly:
+                defaultOpModeVoltageSensors = unwrappedMap.getAll(VoltageSensor.class);
+            } else {
+                defaultOpModeVoltageSensors = null;
+                capture.allCounters = allCounters;
+
+                // Record some interesting counter values to start the capture:
+                capture.markBonus(true);
+                capture.recordCounterValues(Counters.instance.queryInterestingCounters(false));
+                capture.markBonus(false);
+            }
+        }
     }
 }

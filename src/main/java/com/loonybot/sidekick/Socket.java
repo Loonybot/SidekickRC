@@ -22,7 +22,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -531,10 +530,10 @@ class Socket extends NanoWSD.WebSocket {
         JsonObject message = createPush("realtime_sample");
         JsonArray counters = new JsonArray();
         for (String subscribedCounter: subscribedCounters) {
-            List<Float> sample = sampleData.get(subscribedCounter);
-            if (sample != null) {
+            List<Float> valuesList = sampleData.get(subscribedCounter);
+            if (valuesList != null) {
                 JsonArray values = new JsonArray();
-                for (Float value: Objects.requireNonNull(sampleData.get(subscribedCounter))) {
+                for (Float value : valuesList) {
                     values.add(value);
                 }
                 JsonObject counter = new JsonObject();

@@ -224,7 +224,7 @@ class Counters {
 
     // Our instanced state.
     final static Counters instance = new Counters(); // Singleton
-    final static Object lock = new Object(); // Counters lock
+    final static Object countersLock = new Object(); // Counters lock
     LinkedList<String> lynxModuleNames = new LinkedList<>(); // Name of all Lynx modules
     LinkedList<DeviceBundle<?>> deviceBundles = new LinkedList<>(); // All bundles of device counters
     LinkedList<SystemBundle> systemBundles = new LinkedList<>(); // All bundles of system counters
@@ -740,8 +740,8 @@ class Counters {
     /// and allows us to construct the counter lists and initialize the hardware devices. The
     /// caller must hold appropriate locks. This should NOT be called while holding the Sidekick
     /// lock because it needs to create Byte Buddy proxies, which is extremely slow.
-    void prepare(HardwareMap unwrappedMap) {
-        synchronized (lock) {
+    List<CounterDescriptor> prepare(HardwareMap unwrappedMap) {
+        synchronized (countersLock) {
             if (deviceBundles.isEmpty()) {
                 // On the first prepare call, register the device counters:
                 for (DeviceDescriptor<LynxModule> lynx : getDevices(unwrappedMap, LynxModule.class)) {
@@ -782,7 +782,8 @@ class Counters {
                 systemBundles.add(new SelfStatusBundle());
                 systemBundles.add(new SidekickBundle());
             }
-            /// [#allCounters] is complete
+            /// Return a copy of the completed 'allCounters' list:
+            return new LinkedList<>(allCounters);
         }
     }
 
@@ -829,7 +830,7 @@ class Counters {
     /// Call this to update the list of active counters in response to new subscription requests
     /// from connected clients or to new Sk.setSamplers() requests.
     void updateActive(Set<String> subscriptionIds, @Nullable String[] userSetIds) {
-        synchronized (lock) {
+        synchronized (countersLock) {
             // Make a union of subscription IDs, baseline IDs, and user-set IDs:
             Set<String> ids = new HashSet<>(subscriptionIds);
             Collections.addAll(ids, REQUIRED_SAMPLER_IDS);
@@ -868,7 +869,7 @@ class Counters {
 
     /// Query from the active counters. Called periodically (100 ms) from the sampler thread.
     List<CounterValue> queryActive() {
-        synchronized (lock) {
+        synchronized (countersLock) {
             long startTime = System.nanoTime();
             List<CounterValue> values = query(activeSystemCounters);
 
@@ -894,14 +895,14 @@ class Counters {
 
     /// Collect values from the specified set of counters in response to a Sk.getCounters() call.
     List<CounterValue> collectSet(String... ids) {
-        synchronized (lock) {
+        synchronized (countersLock) {
             return query(Arrays.asList(ids));
         }
     }
 
     /// Collect values from interesting device and system counters at the beginning and end of
     /// a capture.
-    List<CounterValue> collectInteresting(@SuppressWarnings("unused") boolean isEnd) {
+    List<CounterValue> queryInterestingCounters(@SuppressWarnings("unused") boolean isEnd) {
         // All system counters that might be useful if sampled only at the start and end
         // of the capture:
         final String[] baselineInterestingCounters = {
@@ -909,7 +910,7 @@ class Counters {
                 "system.storageReadTotal", "system.storageWriteTotal",
                 "system.wifiReceiveTotal", "system.wifiSendTotal",
         };
-        synchronized (lock) {
+        synchronized (countersLock) {
             // Add everything from our 'interesting' list:
             LinkedList<String> ids = new LinkedList<>(Arrays.asList(baselineInterestingCounters));
 
