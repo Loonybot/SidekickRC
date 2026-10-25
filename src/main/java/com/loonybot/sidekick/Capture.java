@@ -815,6 +815,7 @@ class Capture {
     long startNanoTime; // Capture start time, in nanoseconds; same as init time if not started
     long startUnixTime; // Unix time when Start was pressed, in milliseconds
     long endNanoTime; // Capture end time, in nanoseconds
+    String robotName; // E.g., "123-RC"
     String dateAndTime; // Date and time at which the OpMode was initialized, used for file names
     Section[] sections; // Data on all capture sections
     String lastLogcatTime; // Time that the last logcat was saved (null if none saved yet)
@@ -885,6 +886,10 @@ class Capture {
         this.startUnixTime = initUnixTime;
         SimpleDateFormat dateFormatter = new SimpleDateFormat("yyyy-MM-dd '['HH.mmaa']'", Locale.US);
         this.dateAndTime = dateFormatter.format(initDate).toLowerCase(); // Lower 'AM' to 'am'
+
+        InspectionState inspection = new InspectionState();
+        inspection.initializeLocal();
+        this.robotName = inspection.deviceName;
 
         // Initialize the array of file sections to zero:
         this.sections = new Section[Section.COUNT];
@@ -1973,12 +1978,10 @@ class Capture {
     }
 
     /// Verify that the robot controller's name complies with R705. We don't record the team
-    /// name but rather process it here to avoid Personally Identifiable Information in the
-    /// capture when submitting bug reports.
+    /// name but rather process it here to avoid embedding Personally Identifiable Information
+    /// in the capture when submitting bug reports. It's also used for the default filename, but
+    /// that's easily stripped when uploading or sending.
     boolean isCompliantRobotName() {
-        InspectionState inspection = new InspectionState();
-        inspection.initializeLocal();
-        String robotName = inspection.deviceName;
         // The robot name must be of the form "<number>-RC" or "<number>-<letter>-RC".
         return robotName.matches("\\d+-RC") || robotName.matches("\\d+-[A-Z]-RC");
     }
@@ -2227,8 +2230,8 @@ class Capture {
             CountDownLatch limelightDoneLatch = limelightCapture != null ? limelightCapture.doneLatch : null;
             sidekick.fileWorker.submit(new FileWorker.WriteMessage(chunk));
             sidekick.fileWorker.submit(new FileWorker.CloseMessage(sections,
-                    opMode.getClass(), majorError, dateAndTime, startUnixTime, startNanoTime, endNanoTime,
-                    sidekick.lastRunNumber, limelightDoneLatch, fileDoneLatch));
+                    opMode.getClass(), majorError, robotName, dateAndTime, startUnixTime, startNanoTime,
+                    endNanoTime, sidekick.lastRunNumber, limelightDoneLatch, fileDoneLatch));
 
             // Disable any further recording on this capture context:
             currentThreadId = 0; /// Set to zero to force [#threadSwitchAndBookkeeping] calls
@@ -3006,6 +3009,7 @@ class Capture {
     public class SkHardwareMap extends HardwareMap {
         HardwareMap originalMap; // Original unhooked HardwareMap
         Capture capture; // Associated capture
+        boolean isRecursive; // True if a recursive call (not thread safe but good enough)
 
         SkHardwareMap(HardwareMap original, Capture capture, OpModeManagerNotifier notifier) {
             super(original.appContext, notifier);
@@ -3327,13 +3331,18 @@ class Capture {
                 return null;
             }
             device = wrapDevice(device, deviceName, classOrInterface);
-            recordHardwareMapGet("tryGet", nanoStartTime, classOrInterface, deviceName);
+            // The internal implementation of get() calls tryGet() - don't record twice:
+            if (!isRecursive) {
+                recordHardwareMapGet("tryGet", nanoStartTime, classOrInterface, deviceName);
+            }
             return device;
         }
 
         @Override public @Nullable <T> T get(Class<? extends T> classOrInterface, SerialNumber serialNumber) {
             long nanoStartTime = nanoTime();
+            isRecursive = true; // Not thread safe but good enough
             T device = super.get(classOrInterface, serialNumber);
+            isRecursive = false;
             if (device == null) {
                 return null;
             }

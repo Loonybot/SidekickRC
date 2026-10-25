@@ -65,6 +65,7 @@ class FileWorker {
         Section[] sections;
         Class<? extends OpMode> opModeClass;
         boolean majorError;
+        String robotName;
         String dateAndTime;
         long startUnixTime;
         long startNanoTime;
@@ -73,11 +74,13 @@ class FileWorker {
         CountDownLatch limelightDoneLatch;
         CountDownLatch fileDoneLatch;
         public CloseMessage(Section[] sections, Class<? extends OpMode> opModeClass, boolean majorError,
-                            String dateAndTime, long startUnixTime, long startNanoTime, long endNanoTime,
-                            int lastRunNumber, CountDownLatch limelightDoneLatch, CountDownLatch fileDoneLatch) {
+                            String robotName, String dateAndTime, long startUnixTime, long startNanoTime,
+                            long endNanoTime, int lastRunNumber, CountDownLatch limelightDoneLatch,
+                            CountDownLatch fileDoneLatch) {
             this.sections = sections;
             this.opModeClass = opModeClass;
             this.majorError = majorError;
+            this.robotName = robotName;
             this.dateAndTime = dateAndTime;
             this.startUnixTime = startUnixTime;
             this.startNanoTime = startNanoTime;
@@ -130,6 +133,7 @@ class FileWorker {
 
         // Signal that the priming is done:
         Sidekick.primingDoneSignal.countDown();
+        Sidekick.logI("Worker thread ready.");
 
         // Now run our main file worker loop:
         try {
@@ -249,9 +253,9 @@ class FileWorker {
         if (isMatchTeleOp)
             descriptor += " (Match)";
 
-        // Create the final filename in the form "2024-11-25 [17.37pm] #1 [176s] TeleOp.sidekick":
-        String fileName = message.dateAndTime + String.format(Locale.US, " #%d [%.0fs] %s.sidekick",
-                message.lastRunNumber, runSeconds, descriptor);
+        // Create the final filename in the form "123-RC 2024-11-25 [17.37pm] #1 [176s] TeleOp.sidekick":
+        String fileName = String.format(Locale.US, "%s %s #%d [%.0fs] %s.sidekick",
+            message.robotName, message.dateAndTime, message.lastRunNumber, runSeconds, descriptor);
 
         // Before potentially creating a new epoch capture, delete all old ones:
         deleteEpochCaptures();

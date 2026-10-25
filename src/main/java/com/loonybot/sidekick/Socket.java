@@ -170,28 +170,31 @@ class Socket extends NanoWSD.WebSocket {
 
         // Check to see if an opMode is actually running - that would be the newest:
         FtcEventLoop eventLoop = Sidekick.instance.eventLoop;
-        OpMode activeOpMode = eventLoop.getOpModeManager().getActiveOpMode();
-        if ((activeOpMode != null) && !(activeOpMode instanceof OpModeManagerImpl.DefaultOpMode)) {
-            // An opMode is running...
-            if (!terminate) {
-                // An opMode is still running but the caller hasn't asked us to terminate it:
-                response.addProperty("name", "");
-                response.addProperty("running", true);
-                sendJson(response);
-                return; // ===>
-            } else {
-                // Request that the active opMode be stopped:
-                eventLoop.requestOpModeStop(activeOpMode);
+        if (eventLoop != null) { // Can be null very early in the startup process
+            OpMode activeOpMode = eventLoop.getOpModeManager().getActiveOpMode();
+            if ((activeOpMode != null) && !(activeOpMode instanceof OpModeManagerImpl.DefaultOpMode)) {
+                // An opMode is running...
+                if (!terminate) {
+                    // An opMode is still running but the caller hasn't asked us to terminate it:
+                    response.addProperty("name", "");
+                    response.addProperty("running", true);
+                    sendJson(response);
+                    return; // ===>
+                } else {
+                    // Request that the active opMode be stopped:
+                    eventLoop.requestOpModeStop(activeOpMode);
 
-                // Wait on the capture file to be closed, with a 5-second timeout. Note that if
-                // the capture has already been ended (e.g., because it hit 120 seconds), the
-                // latch will already be closed.
-                try {
-                    // Note that we intentionally don't hold any lock here.
-                    if (!Capture.instance.fileDoneLatch.await(5000, TimeUnit.MILLISECONDS)) {
-                        Sidekick.logW("Timed out waiting for capture file to close");
+                    // Wait on the capture file to be closed, with a 5-second timeout. Note that if
+                    // the capture has already been ended (e.g., because it hit 120 seconds), the
+                    // latch will already be closed.
+                    try {
+                        // Note that we intentionally don't hold any lock here.
+                        if (!Capture.instance.fileDoneLatch.await(5000, TimeUnit.MILLISECONDS)) {
+                            Sidekick.logW("Timed out waiting for capture file to close");
+                        }
+                    } catch (InterruptedException ignored) {
                     }
-                } catch (InterruptedException ignored) {}
+                }
             }
         }
 
