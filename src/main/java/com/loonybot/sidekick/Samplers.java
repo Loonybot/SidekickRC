@@ -1,4 +1,4 @@
-/// Logic for the Sidekick hardware counters.
+/// Logic for the Sidekick samplers.
 ///
 /// Copyright James Goossen.
 package com.loonybot.sidekick;
@@ -176,16 +176,16 @@ class SystemHelp {
     }
 }
 
-/// Descriptor for enumerating supported counter types.
-class CounterDescriptor {
-    String id; // Identifier of the counter (e.g., "Control Hub.current", "system.temperature")
-    int index; // Index into the index into the 'allCounters' list
-    boolean isSystem; // True if this is a system counter (as opposed to a device counter)
-    String description; // Description of the counter
+/// Descriptor for enumerating supported sampler types.
+class SamplerDescriptor {
+    String id; // Identifier of the sampler (e.g., "Control Hub.current", "system.temperature")
+    int index; /// Index into the index into the [Samplers#allSamplers] list
+    boolean isSystem; // True if this is a system sampler (as opposed to a device sampler)
+    String description; // Description of the sampler
     String unit; // Unit (e.g., "C")
     boolean isInteger; // True if the value represents an integer
-    Supplier<Double> query; // Query to get the value of the counter
-    public CounterDescriptor(String id, int index, boolean isSystem, String description,
+    Supplier<Double> query; // Query to get the value of the sampler
+    public SamplerDescriptor(String id, int index, boolean isSystem, String description,
                              String unit, boolean isInteger, Supplier<Double> query) {
         this.id = id;
         this.index = index;
@@ -197,45 +197,45 @@ class CounterDescriptor {
     }
 }
 
-/// Values repository for counters.
-class CounterValue {
-    String id; // Counter identifier
-    int index; // Index of counter in 'allCounters' list
+/// Values repository for samplers.
+class SamplerValue {
+    String id; // Sampler identifier
+    int index; /// Index of sampler in [Samplers#allSamplers] list
     double value; // The metadata says whether to interpret as an integer
-    CounterValue(String id, int index, double value) {
+    SamplerValue(String id, int index, double value) {
         this.id = id;
         this.index = index;
         this.value = value;
     }
 }
 
-/// Fundamental types of counters.
-enum CounterType {
+/// Fundamental types of samplers.
+enum SamplersType {
     DEVICE, // Queries a device API call (so the query call is automatically captured)
     SYSTEM, // Queries a system OS call (so the query calls are not automatically captured)
 }
 
-/// Track counter state.
-class Counters {
-    // These baseline system counters will always be collected:
+/// Track samplers and their state.
+class Samplers {
+    // These baseline samplers will always be collected:
     final static String[] REQUIRED_SAMPLER_IDS = {
             "system.frequency", "system.opModeUtilization",
     };
 
     // Our instanced state.
-    final static Counters instance = new Counters(); // Singleton
-    final static Object countersLock = new Object(); // Counters lock
+    final static Samplers instance = new Samplers(); // Singleton
+    final static Object samplersLock = new Object(); // Samplers lock
     LinkedList<String> lynxModuleNames = new LinkedList<>(); // Name of all Lynx modules
-    LinkedList<DeviceBundle<?>> deviceBundles = new LinkedList<>(); // All bundles of device counters
-    LinkedList<SystemBundle> systemBundles = new LinkedList<>(); // All bundles of system counters
-    LinkedList<CounterDescriptor> allCounters = new LinkedList<>(); // Collection of all counters
-    HashMap<String, CounterDescriptor> countersById = new HashMap<>(); // Covers all counters
-    HashMap<String, Supplier<Boolean>> setupsById = new HashMap<>(); // Covers counters with setups
-    HashMap<Supplier<Boolean>, List<CounterDescriptor>> countersBySetup = new HashMap<>();
-    LinkedList<String> activeDeviceCounters = new LinkedList<>(); // Actively subscribed device counters
-    LinkedList<String> activeSystemCounters = new LinkedList<>(); // Actively subscribed system counters
+    LinkedList<DeviceBundle<?>> deviceBundles = new LinkedList<>(); // All bundles of device samplers
+    LinkedList<SystemBundle> systemBundles = new LinkedList<>(); // All bundles of system samplers
+    LinkedList<SamplerDescriptor> allSamplers = new LinkedList<>(); // Collection of all samplers
+    HashMap<String, SamplerDescriptor> samplersById = new HashMap<>(); // Covers all samplers
+    HashMap<String, Supplier<Boolean>> setupsById = new HashMap<>(); // Covers samplers with setups
+    HashMap<Supplier<Boolean>, List<SamplerDescriptor>> samplersBySetup = new HashMap<>();
+    LinkedList<String> activeDeviceSamplers = new LinkedList<>(); // Actively subscribed device samplers
+    LinkedList<String> activeSystemSamplers = new LinkedList<>(); // Actively subscribed system samplers
     int roundRobinIndex = 0; // Index into activeDeviceGroups for round-robin sampling
-    float sampleAcquisitionTime = 0; // Time it took to acquire all sampled counters, ms
+    float sampleAcquisitionTime = 0; // Time it took to query all samplers, ms
 
     /// A hardware device along with its friendly configuration name.
     static class DeviceDescriptor<T extends HardwareDevice> {
@@ -247,48 +247,55 @@ class Counters {
         }
     }
 
-    /// A bundle contains counters that are related and share common state and/or setup.
-    abstract class CounterBundle {
-        CounterType type; // Device vs. system counter
-        CounterBundle(CounterType type) { this.type = type; }
+    /// A bundle contains samplers that are related and share common state and/or setup.
+    abstract class SamplerBundle {
+        SamplersType type; // Device vs. system sampler
+        SamplerBundle(SamplersType type) { this.type = type; }
 
+        /// Register a sampler during initialization for potential use.
         void register(String id, String description, String unit, boolean isInteger, Supplier<Double> query) {
             register(id, description, unit, isInteger, null, query);
         }
 
+        /// Register a sampler during initialization for potential use.
         void register(String id, String description, String unit, boolean isInteger, Supplier<Boolean> setup, Supplier<Double> query) {
-            CounterDescriptor counter = new CounterDescriptor(id, allCounters.size(),
-                    (type == CounterType.SYSTEM), description, unit, isInteger, query);
+            SamplerDescriptor sampler = new SamplerDescriptor(id, allSamplers.size(),
+                    (type == SamplersType.SYSTEM), description, unit, isInteger, query);
             if (setup != null) {
-                countersBySetup.computeIfAbsent(setup, k -> new LinkedList<>()).add(counter);
+                samplersBySetup.computeIfAbsent(setup, k -> new LinkedList<>()).add(sampler);
                 setupsById.put(id, setup);
             }
-            countersById.put(id, counter);
-            allCounters.add(counter);
+            samplersById.put(id, sampler);
+            allSamplers.add(sampler);
         }
+
+        /// Derived classes can implement this to renew their counters when a new op mode starts.
+        /// NOTE: capture may be null!
+        void renew(@Nullable Capture capture) {}
     }
 
-    /// System counters derive from this.
-    class SystemBundle extends CounterBundle {
-        SystemBundle() { super(CounterType.SYSTEM); }
+    /// System samplers derive from this.
+    class SystemBundle extends SamplerBundle {
+        SystemBundle() { super(SamplersType.SYSTEM); }
     }
 
-    /// Device counters derive from this.
-    abstract class DeviceBundle<T extends HardwareDevice> extends CounterBundle {
+    /// Device samplers derive from this.
+    abstract class DeviceBundle<T extends HardwareDevice> extends SamplerBundle {
         DeviceDescriptor<T> descriptor;
         DeviceBundle(DeviceDescriptor<T> descriptor) {
-            super(CounterType.DEVICE);
+            super(SamplersType.DEVICE);
             this.descriptor = descriptor;
         }
 
         /// Get a new instance of the device when a new opMode is started.
-        void renew(HardwareMap hardwareMap) {
+        void renew(Capture capture, HardwareMap hardwareMap) {
             T device = hardwareMap.tryGet(descriptor.klass, descriptor.name);
             if (device != null) {
                 descriptor = new DeviceDescriptor<>(descriptor.klass, descriptor.name, device);
             } else {
                 Sidekick.logE("Couldn't renew hardware device");
             }
+            super.renew(capture);
         }
     }
 
@@ -307,7 +314,7 @@ class Counters {
 
     ////////////////////////////////////////////////////////////////////////////////////////////////
 
-    /// Return counters for Lynx modules.
+    /// Return samplers for Lynx modules.
     class LynxBundle extends DeviceBundle<LynxModule> {
         LynxBundle(DeviceDescriptor<LynxModule> initialDescriptor) {
             super(initialDescriptor);
@@ -325,7 +332,7 @@ class Counters {
         }
     }
 
-    /// Return counters for the voltage sensor.
+    /// Return samplers for the voltage sensor.
     class VoltageBundle extends DeviceBundle<VoltageSensor> {
         VoltageBundle(DeviceDescriptor<VoltageSensor> initialDescriptor) {
             super(initialDescriptor);
@@ -334,7 +341,7 @@ class Counters {
         }
     }
 
-    /// Return counters for Limelight 3A.
+    /// Return samplers for Limelight 3A.
     class LimelightBundle extends DeviceBundle<Limelight3A> {
         LLStatus status;
         LimelightBundle(DeviceDescriptor<Limelight3A> initialDescriptor) {
@@ -352,7 +359,7 @@ class Counters {
         }
     }
 
-    /// Counter for the goBilda Floodgate sensor.
+    /// Sampler for the goBilda Floodgate sensor.
     class FloodgateBundle extends DeviceBundle<AnalogInput> {
         FloodgateBundle(DeviceDescriptor<AnalogInput> initialDescriptor) {
             super(initialDescriptor);
@@ -363,7 +370,7 @@ class Counters {
         }
     }
 
-    /// Counter for DcMotorEx state.
+    /// Sampler for DcMotorEx state.
     class MotorBundle extends DeviceBundle<DcMotorEx> {
         MotorBundle(DeviceDescriptor<DcMotorEx> initialDescriptor) {
             super(initialDescriptor);
@@ -463,17 +470,25 @@ class Counters {
 
     /// Return the CPU utilization of the OpMode thread.
     class OpModeThreadBundle extends SystemBundle {
+        Capture capture;
         int previousJiffies;
-        long previousNanos = System.nanoTime();
+        long previousNanos;
         double result;
 
         OpModeThreadBundle() {
             register("system.opModeUtilization", "OpMode thread CPU utilization", "%", false,
                     this::setup, () -> result);
         }
+        void renew(Capture capture) {
+            this.capture = capture;
+            if (capture != null) {
+                this.previousJiffies = SystemHelp.getThreadJiffies(capture.opModeTid);
+                this.previousNanos = System.nanoTime();
+            }
+        }
         boolean setup() {
-            if ((Capture.instance != null) && (Capture.instance.opModeThreadDescriptor != null)) {
-                int jiffies = SystemHelp.getThreadJiffies(Capture.instance.opModeTid);
+            if ((capture != null) && (capture.opModeThreadDescriptor != null)) {
+                int jiffies = SystemHelp.getThreadJiffies(capture.opModeTid);
                 if (jiffies != -1) { // Thread exists and running when >= 0
                     long nanos = System.nanoTime();
                     result = 100.0 * (jiffies - previousJiffies) / Capture.nanosToJiffies(nanos - previousNanos);
@@ -483,7 +498,7 @@ class Counters {
                     // read its final jiffy count. We make do with remembering its most
                     // recent sampled jiffy count instead. Note that we are safe doing this
                     // without acquiring a lock as there is no chance of contention:
-                    ThreadDescriptor opModeThread = Capture.instance.opModeThreadDescriptor;
+                    ThreadDescriptor opModeThread = capture.opModeThreadDescriptor;
                     opModeThread.jiffyDuration = jiffies - opModeThread.jiffyStart;
 
                     // Prepare for the next call:
@@ -570,20 +585,27 @@ class Counters {
         long previousReadSectors = -1;
         long previousWriteSectors = -1;
         long previousMillis = System.currentTimeMillis();
-        double readTotalResult;
-        double writeTotalResult;
+        double readTotal;
+        double writeTotal;
+        double readTotalBias;
+        double writeTotalBias;
         double readBandwidthResult;
         double writeBandwidthResult;
 
         StorageBandwidthBundle() {
             register("system.storageReadTotal", "Storage read total", "MB", false,
-                    this::setup, () -> readTotalResult);
+                    this::setup, () -> readTotal + readTotalBias);
             register("system.storageWriteTotal", "Storage write total", "MB", false,
-                    this::setup, () -> writeTotalResult);
+                    this::setup, () -> writeTotal + writeTotalBias);
             register("system.storageReadRate", "Storage read bandwidth", "MB/s", false,
                     this::setup, () -> readBandwidthResult);
             register("system.storageWriteRate", "Storage write bandwidth", "MB/s", false,
                     this::setup, () -> writeBandwidthResult);
+        }
+        void renew(Capture capture) {
+            // Reset the effective totals to zero at the start of every op mode:
+            readTotalBias = -readTotal;
+            writeTotalBias = -writeTotal;
         }
         boolean setup() {
             String line = SystemHelp.readFileFirstLine("/sys/block/mmcblk0/stat");
@@ -604,8 +626,8 @@ class Counters {
             double inverseDeltaT = (deltaMillis != 0) ? 1000.0 / deltaMillis : 0; // Seconds
             double bandwidthMultiplier = totalMultiplier * inverseDeltaT; // Sectors to MB/s
 
-            readTotalResult = sectorsRead * totalMultiplier;
-            writeTotalResult = sectorsWritten * totalMultiplier;
+            readTotal = sectorsRead * totalMultiplier;
+            writeTotal = sectorsWritten * totalMultiplier;
             readBandwidthResult = sectorsReadDelta * bandwidthMultiplier;
             writeBandwidthResult = sectorsWrittenDelta * bandwidthMultiplier;
             return true;
@@ -617,20 +639,26 @@ class Counters {
         long previousRxBytes = -1;
         long previousTxBytes = -1;
         long previousMillis = System.currentTimeMillis();
-        double receiveTotalResult;
-        double sendTotalResult;
+        double receiveTotal;
+        double sendTotal;
+        double receiveTotalBias;
+        double sendTotalBias;
         double receiveRateResult;
         double sendRateResult;
 
         WifiBandwidthBundle() {
             register("system.wifiReceiveTotal", "Wi-Fi receive total", "MB", false,
-                    this::setup, () -> receiveTotalResult);
+                    this::setup, () -> receiveTotal + receiveTotalBias);
             register("system.wifiSendTotal", "Wi-Fi send total", "MB", false,
-                    this::setup, () -> sendTotalResult);
+                    this::setup, () -> sendTotal + sendTotalBias);
             register("system.wifiReceiveRate", "Wi-Fi receive bandwidth", "MB/s", false,
                     this::setup, () -> receiveRateResult);
             register("system.wifiSendRate", "Wi-Fi send bandwidth", "MB/s", false,
                     this::setup, () -> sendRateResult);
+        }
+        void renew(Capture capture) {
+            receiveTotalBias = -receiveTotal;
+            sendTotalBias = -sendTotal;
         }
         boolean setup() {
             long deltaMillis = System.currentTimeMillis() - previousMillis;
@@ -643,7 +671,7 @@ class Counters {
             String line = SystemHelp.readFileFirstLine("/sys/class/net/wlan0/statistics/rx_bytes");
             if (line != null) {
                 long rxBytes = SystemHelp.parseLong(line);
-                receiveTotalResult = rxBytes * totalMultiplier;
+                receiveTotal = rxBytes * totalMultiplier;
                 long rxDelta = rxBytes - previousRxBytes;
                 previousRxBytes = rxBytes;
                 receiveRateResult = rxDelta * rateMultiplier;
@@ -651,7 +679,7 @@ class Counters {
             line = SystemHelp.readFileFirstLine("/sys/class/net/wlan0/statistics/tx_bytes");
             if (line != null) {
                 long txBytes = SystemHelp.parseLong(line);
-                sendTotalResult = txBytes * totalMultiplier;
+                sendTotal = txBytes * totalMultiplier;
                 long txDelta = txBytes - previousTxBytes;
                 previousTxBytes = txBytes;
                 sendRateResult = txDelta * rateMultiplier;
@@ -715,7 +743,7 @@ class Counters {
                     this::setup, () -> pendingWritesResult);
             register("sidekick.writeRate", "Sidekick write bandwidth", "MB/s", false,
                     this::setup, () -> writeRateResult);
-            register("sidekick.sampleTime", "Sidekick's time it takes to sample counters", "ms", false,
+            register("sidekick.sampleTime", "Sidekick's time it takes to query samplers", "ms", false,
                     this::setup, () -> sampleTimeResult);
         }
 
@@ -737,13 +765,13 @@ class Counters {
     // APIs
 
     /// This is called whenever a new OpMode is started. It informs us of the new HardwareMap
-    /// and allows us to construct the counter lists and initialize the hardware devices. The
+    /// and allows us to construct the sampler lists and initialize the hardware devices. The
     /// caller must hold appropriate locks. This should NOT be called while holding the Sidekick
     /// lock because it needs to create Byte Buddy proxies, which is extremely slow.
-    List<CounterDescriptor> prepare(HardwareMap unwrappedMap) {
-        synchronized (countersLock) {
+    List<SamplerDescriptor> prepare(Capture capture, HardwareMap unwrappedMap) {
+        synchronized (samplersLock) {
             if (deviceBundles.isEmpty()) {
-                // On the first prepare call, register the device counters:
+                // On the first prepare call, register the device samplers:
                 for (DeviceDescriptor<LynxModule> lynx : getDevices(unwrappedMap, LynxModule.class)) {
                     lynxModuleNames.add(lynx.name);
                     deviceBundles.add(new LynxBundle(lynx));
@@ -762,14 +790,18 @@ class Counters {
                 for (DeviceDescriptor<DcMotorEx> motor : getDevices(unwrappedMap, DcMotorEx.class)) {
                     deviceBundles.add(new MotorBundle(motor));
                 }
-            } else {
-                // On subsequent prepare calls, we only recreate the device objects:
+                // Let the samplers know the capture instance if they want it:
                 for (DeviceBundle<?> bundle : deviceBundles) {
-                    bundle.renew(unwrappedMap);
+                    bundle.renew(capture);
+                }
+            } else {
+                // On subsequent prepare calls, recreate the device objects and let the samplers know:
+                for (DeviceBundle<?> bundle : deviceBundles) {
+                    bundle.renew(capture, unwrappedMap);
                 }
             }
             if (systemBundles.isEmpty()) {
-                // On the first call, register the system counters:
+                // On the first prepare, register the system samplers:
                 systemBundles.add(new CpuFrequencyBundle());
                 systemBundles.add(new ScalingGovernorBundle());
                 systemBundles.add(new SystemUtilizationBundle());
@@ -782,23 +814,27 @@ class Counters {
                 systemBundles.add(new SelfStatusBundle());
                 systemBundles.add(new SidekickBundle());
             }
-            /// Return a copy of the completed 'allCounters' list:
-            return new LinkedList<>(allCounters);
+            // Let the samplers know that a new op mode has started, along with the capture instance:
+            for (SystemBundle bundle : systemBundles) {
+                bundle.renew(capture);
+            }
+            /// Return a copy of the completed 'allSamplers' list:
+            return new LinkedList<>(allSamplers);
         }
     }
 
-    /// Query a specified set of counters. Robust to invalid IDs.
-    List<CounterValue> query(List<String> ids) {
+    /// Query a specified set of samplers. Robust to invalid IDs.
+    List<SamplerValue> query(List<String> ids) {
         // Create the list of setups and queries that we want to call, and call the setups:
         Set<Supplier<Boolean>> setups = new HashSet<>();
-        Set<CounterDescriptor> counters = new HashSet<>(); // Set to protect against duplicates
+        Set<SamplerDescriptor> samplers = new HashSet<>(); // Set to protect against duplicates
         for (String id : ids) {
             Supplier<Boolean> setup = setupsById.get(id);
             if (setup == null) {
-                // No setup routine so there's only one associated counter (if the counter is valid):
-                CounterDescriptor counter = countersById.get(id);
-                if (counter != null) {
-                    counters.add(countersById.get(id));
+                // No setup routine so there's only one associated sampler (if the sampler is valid):
+                SamplerDescriptor sampler = samplersById.get(id);
+                if (sampler != null) {
+                    samplers.add(samplersById.get(id));
                 }
             } else {
                 // If we haven't already called this setup routine, do so and add it to the set:
@@ -808,77 +844,85 @@ class Counters {
                     // If the setup is successful, add all the associated queries to the set
                     // since their queries are basically free at this point:
                     if (setup.get()) {
-                        List<CounterDescriptor> associatedCounters = countersBySetup.get(setup);
-                        if (associatedCounters != null) {
-                            counters.addAll(associatedCounters);
+                        List<SamplerDescriptor> associatedSamplers = samplersBySetup.get(setup);
+                        if (associatedSamplers != null) {
+                            samplers.addAll(associatedSamplers);
                         }
                     }
                 }
             }
         }
 
-        // We've called all the setups and accumulated all counters to query so do the queries.
+        // We've called all the setups and accumulated all samplers to query so do the queries.
         // We don't bother marking as 'bonus' because the app special-cases everything from
         // the Sidekick Sampler Worker thread.
-        List<CounterValue> values = new ArrayList<>();
-        for (CounterDescriptor counter : counters) {
-            values.add(new CounterValue(counter.id, counter.index, counter.query.get()));
+        List<SamplerValue> values = new ArrayList<>();
+        for (SamplerDescriptor sampler : samplers) {
+            values.add(new SamplerValue(sampler.id, sampler.index, sampler.query.get()));
         }
         return values;
     }
 
-    /// Call this to update the list of active counters in response to new subscription requests
-    /// from connected clients or to new Sk.setSamplers() requests.
-    void updateActive(Set<String> subscriptionIds, @Nullable String[] userSetIds) {
-        synchronized (countersLock) {
-            // Make a union of subscription IDs, baseline IDs, and user-set IDs:
-            Set<String> ids = new HashSet<>(subscriptionIds);
-            Collections.addAll(ids, REQUIRED_SAMPLER_IDS);
+    /// Return the list of samplers that will be recorded regardless of what samplers are
+    /// requested by connected clients.
+    Set<String> getBaselineSamplerSet() {
+        Set<String> ids = new HashSet<>(Arrays.asList(REQUIRED_SAMPLER_IDS));
 
-            // If the user has called Sk.setSamplers() (even if to set an empty set), then
-            // add those to the set. If the user has NOT called Sk.setSamplers(), our default
-            // is to add the Floodgate sensor current if it exists, otherwise to add each hub's
-            // current sensor.
-            if (userSetIds != null) {
-                Collections.addAll(ids, userSetIds);
+        // If the user has called Sk.setSamplers() (even if to set an empty set), then
+        // add those to the set. If the user has NOT called Sk.setSamplers(), our default
+        // is to add the Floodgate sensor current if it exists, otherwise to add each hub's
+        // current sensor.
+        if (Sidekick.instance.userSetSamplers != null) {
+            Collections.addAll(ids, Sidekick.instance.userSetSamplers);
+        } else {
+            if (samplersById.get(Sidekick.FLOODGATE_SENSOR + ".current") != null) {
+                ids.add(Sidekick.FLOODGATE_SENSOR + ".current");
             } else {
-                if (countersById.get(Sidekick.FLOODGATE_SENSOR) != null) {
-                    ids.add(Sidekick.FLOODGATE_SENSOR);
-                } else {
-                    for (String lynxName : lynxModuleNames) {
-                        ids.add(lynxName + ".current");
-                    }
+                for (String lynxName : lynxModuleNames) {
+                    ids.add(lynxName + ".current");
                 }
             }
+        }
 
-            // Categorize the IDs into system vs. device counters:
-            activeDeviceCounters.clear();
-            activeSystemCounters.clear();
+        return ids;
+    }
+
+    /// Call this to update the list of active samplers in response to new subscription requests
+    /// from connected clients or to new Sk.setSamplers() requests.
+    void updateActiveSamplerList(Set<String> subscriptionIds) {
+        synchronized (samplersLock) {
+            // Make a union of subscription IDs, required IDs, and user-set IDs:
+            Set<String> ids = new HashSet<>(subscriptionIds);
+            ids.addAll(getBaselineSamplerSet());
+
+            // Categorize the IDs into system vs. device samplers:
+            activeDeviceSamplers.clear();
+            activeSystemSamplers.clear();
             for (String id : ids) {
-                CounterDescriptor descriptor = countersById.get(id);
+                SamplerDescriptor descriptor = samplersById.get(id);
                 if (descriptor != null) {
                     if (descriptor.isSystem) {
-                        activeSystemCounters.add(id);
+                        activeSystemSamplers.add(id);
                     } else {
-                        activeDeviceCounters.add(id);
+                        activeDeviceSamplers.add(id);
                     }
                 }
             }
         }
     }
 
-    /// Query from the active counters. Called periodically (100 ms) from the sampler thread.
-    List<CounterValue> queryActive() {
-        synchronized (countersLock) {
+    /// Query from the active samplers. Called periodically (100 ms) from the sampler thread.
+    List<SamplerValue> queryActive() {
+        synchronized (samplersLock) {
             long startTime = System.nanoTime();
-            List<CounterValue> values = query(activeSystemCounters);
+            List<SamplerValue> values = query(activeSystemSamplers);
 
-            // Device counters are uniformly slow, so we only do one every collection
+            // Device samplers are uniformly slow, so we only do one every collection
             // period in a round-robin between devices. Because they are device queries,
             // they are also automatically recorded into the capture.
-            if (!activeDeviceCounters.isEmpty()) {
-                roundRobinIndex = (roundRobinIndex + 1) % activeDeviceCounters.size();
-                String luckyDevice = activeDeviceCounters.get(roundRobinIndex);
+            if (!activeDeviceSamplers.isEmpty()) {
+                roundRobinIndex = (roundRobinIndex + 1) % activeDeviceSamplers.size();
+                String luckyDevice = activeDeviceSamplers.get(roundRobinIndex);
                 values.addAll(query(Collections.singletonList(luckyDevice)));
             }
 
@@ -888,35 +932,35 @@ class Counters {
         }
     }
 
-    /// Return the number of real time updates necessary before any device counter is re-sampled.
+    /// Return the number of real time updates necessary before any device sampler is re-sampled.
     int getRefreshInterval() {
-        return activeDeviceCounters.size();
+        return activeDeviceSamplers.size();
     }
 
-    /// Collect values from the specified set of counters in response to a Sk.getCounters() call.
-    List<CounterValue> collectSet(String... ids) {
-        synchronized (countersLock) {
+    /// Collect values from the specified set of samplers in response to a [Sk#querySamplers]  call.
+    List<SamplerValue> collectSet(String... ids) {
+        synchronized (samplersLock) {
             return query(Arrays.asList(ids));
         }
     }
 
-    /// Collect values from interesting device and system counters at the beginning and end of
+    /// Collect values from interesting device and system samplers at the beginning and end of
     /// a capture.
-    List<CounterValue> queryInterestingCounters(@SuppressWarnings("unused") boolean isEnd) {
-        // All system counters that might be useful if sampled only at the start and end
+    List<SamplerValue> queryInterestingSamplers(@SuppressWarnings("unused") boolean isEnd) {
+        // All system samplers that might be useful if sampled only at the start and end
         // of the capture:
-        final String[] baselineInterestingCounters = {
+        final String[] baselineInterestingSamplers = {
                 "system.memAvailable", "system.vmrss", "system.threadCount",
                 "system.storageReadTotal", "system.storageWriteTotal",
                 "system.wifiReceiveTotal", "system.wifiSendTotal",
         };
-        synchronized (countersLock) {
+        synchronized (samplersLock) {
             // Add everything from our 'interesting' list:
-            LinkedList<String> ids = new LinkedList<>(Arrays.asList(baselineInterestingCounters));
+            LinkedList<String> ids = new LinkedList<>(Arrays.asList(baselineInterestingSamplers));
 
-            // Add all available temperature counters:
-            for (CounterDescriptor descriptor : allCounters) {
-                // Collect all temperature counters:
+            // Add all available temperature samplers:
+            for (SamplerDescriptor descriptor : allSamplers) {
+                // Collect all temperature samplers:
                 if (descriptor.id.contains("temperature")) {
                     ids.add(descriptor.id);
                 }

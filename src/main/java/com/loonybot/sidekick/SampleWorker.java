@@ -3,10 +3,12 @@
 /// Copyright James Goossen.
 package com.loonybot.sidekick;
 
-import android.annotation.SuppressLint;
 import android.util.Log;
 
 import com.qualcomm.hardware.lynx.LynxModule;
+import com.qualcomm.robotcore.eventloop.EventLoopManager;
+import com.qualcomm.robotcore.eventloop.opmode.OpMode;
+import com.qualcomm.robotcore.hardware.Gamepad;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 import com.qualcomm.robotcore.util.RobotLog;
@@ -22,75 +24,152 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 
-/// Values repository for realtime counters. Non-instanced and only has static methods.
+/// This class manages a worker thread that samples and records gamepad input. The thread is
+/// long-lived and is notified whenever a new op mode starts.
+///
+/// Gamepad input is an essential part of a capture for doing postmortem analysis. I
+/// considered various alternatives for hooking the data before finally settling on this
+/// method.
+///
+/// * There is no apparent way to wrap Gamepad accesses.
+/// * We can't hook [RecvLoopRunnable.RecvLoopCallback] like [EventLoopManager#gamepadEvent] does.
+/// * We can't replace OpModeInternal.gamepad1 with a derived object that hooks [Gamepad#copy]
+///   because that field gets regularly overwritten.
+/// * We can't sample at a slow rate (e.g., 40 ms) because we don't know when the robot code
+///   actually accessed the new data. It's too misleading to show new input coming in possibly
+///   several control loops after it actually did.
+///
+/// If someone were to modify the SDK to support this scenario better, one approach would be
+/// just two lines of code: add a public 'long' field to Gamepad that is the most recent copy()
+/// time, and update it with nanoTime() on every copy() call. That would let Sidekick change to
+/// a much slower sampling rate while precisely attributing gamepad input time.
+class GamepadWorker {
+    volatile OpMode opMode; // Currently running op mode; guaranteed non-null when the loop runs
+    volatile Capture capture; // Current capture; guaranteed non-null when the loop runs
+    Thread thread; // Our worker thread
+    long timestamp1; // Timestamp of the most recent gamepad1 object
+    long timestamp2; // Timestamp of the most recent gamepad2 object
+
+    /// Register a new op mode. On the first invocation, start the worker thread.
+    void initializeNewOpMode(OpMode opMode, Capture capture) {
+        if (capture != null) {
+            this.opMode = opMode;
+            this.capture = capture; // Always keep this non-null so we can avoid locks
+
+            if (thread == null) {
+                thread = new Thread(this::loop);
+                thread.setPriority(6); // Normal + 1
+                thread.start();
+            }
+        }
+    }
+
+    /// Endless loop run by the dedicated gamepad worker thread.
+    void loop() {
+        Thread.currentThread().setName(Sidekick.GAMEPAD_WORKER_THREAD_NAME);
+        Sidekick.instance.beginThread(Sidekick.GAMEPAD_WORKER_THREAD_NAME);
+
+        while (!Thread.interrupted()) {
+            LockSupport.parkNanos(5_000_000); // Sleep for at least 5 ms
+
+            // Note that we don't take the overhead of thread synchronization when accessing
+            // 'opMode' or 'capture'. As a result, they may be inconsistent between themselves
+            // or stale - both of which are fine. Java guarantees that they at least always
+            // reference valid objects.
+            Gamepad gamepad1 = opMode.gamepad1;
+            if ((gamepad1 != null) && (gamepad1.timestamp != timestamp1)) {
+                timestamp1 = gamepad1.timestamp;
+                capture.recordGamepad(gamepad1.toByteArray());
+            }
+            Gamepad gamepad2 = opMode.gamepad2;
+            if ((gamepad2 != null) && (gamepad2.timestamp != timestamp2)) {
+                timestamp2 = gamepad2.timestamp;
+                capture.recordGamepad(gamepad2.toByteArray());
+            }
+        }
+    }
+}
+
+
+/// Values repository for realtime samplers. Non-instanced and only has static methods.
 /// This is the interface between the Sockets and Sampling logic.
 class Realtime {
     static final Object realtimeLock = new Object(); // Lock for the realtime repository
-    static List<CounterDescriptor> supportedCounters = new ArrayList<>(); // List of supported realtime counters>
-    static HashMap<Socket, Set<String>> subscriptions = new HashMap<>(); // List of subscribed counter IDs by socket
-    static HashMap<String, List<Float>> counterValues = new HashMap<>(); // List of accumulated values for each counter
+    static List<SamplerDescriptor> supportedSamplers = new ArrayList<>(); // List of supported realtime samplers
+    static List<String> baselineSamplerIds = new ArrayList<>(); // Identifies which of the supportedSamplers are baseline
+    static HashMap<Socket, Set<String>> subscriptions = new HashMap<>(); // List of subscribed sampler IDs by socket
+    static HashMap<String, List<Float>> samplerValues = new HashMap<>(); // List of accumulated values for each sampler
     static int updateUniqueness; // Uniqueness incremented every time a subscription changes
     static int queryUniqueness; // If this uniqueness is different from updateUniqueness, there's a new subscription
 
-    /// Return a list of supported realtime counters. Empty if the counter tracker is not
+    /// Return a list of supported realtime samplers. Empty if the sampler tracker is not
     /// initialized. Thread safe.
-    static List<CounterDescriptor> getSupportedCounters() {
-        return Realtime.supportedCounters;
+    static List<SamplerDescriptor> getSupportedSamplers() {
+        return Realtime.supportedSamplers;
     }
 
-    static void setSupportedCounters(List<CounterDescriptor> supportedCounters) {
-        Realtime.supportedCounters = supportedCounters;
+    /// Return a list of baseline samplers. Empty if the sampler tracker is not initialized.
+    /// Thread safe.
+    static List<String> getBaselineSamplerIds() {
+        return Realtime.baselineSamplerIds;
+    }
+
+    /// Set the list of supported samplers.
+    static void setSupportedSamplers(List<SamplerDescriptor> supportedSamplers, List<String> baselineIds) {
+        Realtime.supportedSamplers = supportedSamplers;
+        Realtime.baselineSamplerIds = baselineIds;
         updateUniqueness++;
-        forceActiveCounterUpdate();
+        forceActiveSamplerUpdate();
     }
 
-    /// Update the list of realtime counters subscribed by the specified socket.
-    static void updateSubscription(Socket socket, String[] counterIds) {
+    /// Update the list of realtime samplers subscribed by the specified socket.
+    static void updateSubscription(Socket socket, String[] samplerIds) {
         synchronized (realtimeLock) {
             // Add or remove this socket from the realtime subscriber list, as necessary:
-            if (counterIds.length == 0) {
+            if (samplerIds.length == 0) {
                 subscriptions.remove(socket);
             } else {
-                subscriptions.put(socket, new HashSet<>(Arrays.asList(counterIds)));
+                subscriptions.put(socket, new HashSet<>(Arrays.asList(samplerIds)));
             }
 
-            // Update the aggregated list of all realtime counters subscribed by all sockets:
-            Set<String> allSocketCounters = new HashSet<>();
-            for (Set<String> counters: subscriptions.values()) {
-                allSocketCounters.addAll(counters);
+            // Update the aggregated list of all realtime samplers subscribed by all sockets:
+            Set<String> allSocketSamplers = new HashSet<>();
+            for (Set<String> samplers: subscriptions.values()) {
+                allSocketSamplers.addAll(samplers);
             }
 
-            // Add any newly subscribed counters:
-            for (String counter: allSocketCounters) {
-                if (!counterValues.containsKey(counter)) {
-                    counterValues.put(counter, new LinkedList<>());
+            // Add any newly subscribed samplers:
+            for (String sampler: allSocketSamplers) {
+                if (!samplerValues.containsKey(sampler)) {
+                    samplerValues.put(sampler, new LinkedList<>());
                 }
             }
 
-            // Remove any counters that are no longer subscribed:
-            for (String counter: new LinkedList<>(counterValues.keySet())) {
-                if (!allSocketCounters.contains(counter)) {
-                    counterValues.remove(counter);
+            // Remove any samplers that are no longer subscribed:
+            for (String sampler: new LinkedList<>(samplerValues.keySet())) {
+                if (!allSocketSamplers.contains(sampler)) {
+                    samplerValues.remove(sampler);
                 }
             }
 
-            // Mark that the list of counters has changed:
+            // Mark that the list of samplers has changed:
             updateUniqueness++;
         }
     }
 
-    /// Get the list of realtime counters subscribed by all sockets. Thread safe.
+    /// Get the union of realtime samplers subscribed by all sockets. Thread safe.
     static Set<String> getSubscription() {
         synchronized (realtimeLock) {
             // Make a copy of the values for thread safety:
-            return new HashSet<>(counterValues.keySet());
+            return new HashSet<>(samplerValues.keySet());
         }
     }
 
-    /// Return true if the list of active counters needs to be updated. This might be
-    /// because a socket asked for new counters, or because the user called Sk.setSamplers().
-    static boolean queryActiveCounterUpdate() {
+    /// Return true if the list of active samplers needs to be updated. This might be
+    /// because a socket asked for new samplers, or because the user called Sk.setSamplers().
+    static boolean activeSamplerListNeedsUpdating() {
         synchronized (realtimeLock) {
             boolean needsUpdate = queryUniqueness != updateUniqueness;
             queryUniqueness = updateUniqueness;
@@ -98,40 +177,40 @@ class Realtime {
         }
     }
 
-    /// Mark that the list of counters has changed. Thread safe.
-    static void forceActiveCounterUpdate() {
+    /// Mark that the list of samplers has changed. Thread safe.
+    static void forceActiveSamplerUpdate() {
         synchronized (realtimeLock) {
             updateUniqueness++;
         }
     }
 
-    /// Append the new counter values to the queued list that is waiting to get pushed to the
+    /// Append the new sampler values to the queued list that is waiting to get pushed to the
     /// sockets. Thread safe.
-    static void queue(List<CounterValue> newValues) {
-        for (CounterValue newValue : newValues) {
+    static void queue(List<SamplerValue> newValues) {
+        for (SamplerValue newValue : newValues) {
             // Note that we don't need to acquire the lock: there is never thread contention for
-            // the same counter/list, and Java won't crash if unsubscribing at the same time.
-            List<Float> values = counterValues.get(newValue.id);
+            // the same sampler/list, and Java won't crash if unsubscribing at the same time.
+            List<Float> values = samplerValues.get(newValue.id);
             if (values != null) {
-                // A socket has subscribed to this counter, so record the value:
+                // A socket has subscribed to this sampler, so record the value:
                 values.add((float) newValue.value); // Cast from double
             }
         }
     }
 
-    /// Push the accumulated realtime counters to all subscribed sockets.
+    /// Push the accumulated realtime samplers to all subscribed sockets.
     static void push() {
         synchronized(realtimeLock) {
             // Send the realtime values to subscribed sockets:
             for (Socket socket: subscriptions.keySet()) {
-                Set<String> counters = subscriptions.get(socket);
-                assert(counters != null);
-                socket.pushRealtimeCounters(counters, counterValues);
+                Set<String> samplers = subscriptions.get(socket);
+                assert(samplers != null);
+                socket.pushRealtimeSamplers(samplers, samplerValues);
             }
 
             // Clear the values in preparation for the next round:
-            for (String counter: counterValues.keySet()) {
-                List<Float> values = counterValues.get(counter);
+            for (String sampler: samplerValues.keySet()) {
+                List<Float> values = samplerValues.get(sampler);
                 assert(values != null);
                 values.clear();
             }
@@ -255,8 +334,8 @@ class SampleWorker {
     String globalWarningMessage = ""; /// Last result from [RobotLog#getGlobalWarningMessage]
     boolean first = true; /// True if the first call to [#doWork]
     DashboardSampler dashboardSampler = new DashboardSampler(); // Sample FTC Dashboard
-    PeriodTracker counterSamplePeriod = new PeriodTracker(100); // Sample counters every 100ms
-    PeriodTracker counterUpdatePeriod = new PeriodTracker(200); // Update the PC every fifth of a second
+    PeriodTracker samplerSamplePeriod = new PeriodTracker(100); // Sample samplers every 100ms
+    PeriodTracker samplerUpdatePeriod = new PeriodTracker(200); // Update the PC every fifth of a second
     PeriodTracker dashboardSamplePeriod = new PeriodTracker(50); // Sample FTC Dashboard updates every 50ms
     PeriodTracker broadcastBatteryVoltagePeriod = new PeriodTracker(500); // Broadcast voltage every half second
     PeriodTracker globalMessagePeriod = new PeriodTracker(500); // Check for global messages every 500ms
@@ -267,9 +346,8 @@ class SampleWorker {
     });
 
     /// Constructor for SampleWorker that sets up the periodic task.
-    @SuppressLint("DiscouragedApi") // Lint wants us to use scheduleWithFixedDelay
     SampleWorker() {
-        scheduler.scheduleAtFixedRate(() -> {
+        scheduler.scheduleWithFixedDelay(() -> {
             try {
                 doWork();
             } catch (Throwable t) { // Never let exceptions escape — they kill the task
@@ -289,10 +367,10 @@ class SampleWorker {
             }
 
             long currentNanoTime = System.nanoTime();
-            if (counterSamplePeriod.isDue(currentNanoTime)) {
-                sampleCounters();
+            if (samplerSamplePeriod.isDue(currentNanoTime)) {
+                querySamplers();
             }
-            if (counterUpdatePeriod.isDue(currentNanoTime)) {
+            if (samplerUpdatePeriod.isDue(currentNanoTime)) {
                 Realtime.push();
             }
             if (broadcastBatteryVoltagePeriod.isDue(currentNanoTime) && okayToSample()) {
@@ -338,19 +416,19 @@ class SampleWorker {
         }
     }
 
-    /// Sample performance counters.
-    void sampleCounters() {
-        if (Realtime.queryActiveCounterUpdate()) {
-            Counters.instance.updateActive(Realtime.getSubscription(), Sidekick.instance.userSetSamplers);
+    /// Query the samplers.
+    void querySamplers() {
+        if (Realtime.activeSamplerListNeedsUpdating()) {
+            Samplers.instance.updateActiveSamplerList(Realtime.getSubscription());
         }
 
         if (okayToSample()) {
-            // Collect the counters:
-            List<CounterValue> values = Counters.instance.queryActive();
+            // Collect from the samplers:
+            List<SamplerValue> values = Samplers.instance.queryActive();
 
             // Record system samples into the capture:
             if (capture != null) {
-                capture.recordCounterValues(values);
+                capture.recordSamplerValues(values);
             }
 
             // Queue all sample values for real-time display at the PC (it's okay that we provide
@@ -359,8 +437,8 @@ class SampleWorker {
         }
     }
 
-    /// Return 'true' if it's okay to use a hardware device to sample a counter. A scenario where
-    /// it's not permissible to sample counters is when exiting from 'Configure Devices'. Our
+    /// Return 'true' if it's okay to use a hardware device to query a sampler. A scenario where
+    /// it's not permissible to query a sampler is when exiting from 'Configure Devices'. Our
     /// usage isn't atomic with respect to the system, but that's okay as the system device
     /// calls themselves do their own check. However, our check is useful for avoiding Logcat
     /// spew for 99.99% of the time.
@@ -375,15 +453,17 @@ class SampleWorker {
         assert(!Thread.holdsLock(Sidekick.sidekickLock));
         synchronized(sampleWorkerLock) {
             capture = newCapture;
+            Samplers samplers = Samplers.instance;
 
             // Get a new Lynx module using the new HardwareMap:
             canaryModule = unwrappedMap.getAll(LynxModule.class).get(0);
 
-            // Prepare the counter logic:
-            List<CounterDescriptor> allCounters = Counters.instance.prepare(unwrappedMap);
+            // Prepare the sampler logic. These provide copied lists:
+            List<SamplerDescriptor> allSamplers = samplers.prepare(capture, unwrappedMap);
+            Set<String> baselineIds = samplers.getBaselineSamplerSet();
 
             // Inform other components of the results of the preparation:
-            Realtime.setSupportedCounters(allCounters);
+            Realtime.setSupportedSamplers(allSamplers, new ArrayList<>(baselineIds));
 
             if (capture == null) {
                 // When the default opMode is running, we can't rely on the hooked SkVoltageSensor
@@ -391,11 +471,11 @@ class SampleWorker {
                 defaultOpModeVoltageSensors = unwrappedMap.getAll(VoltageSensor.class);
             } else {
                 defaultOpModeVoltageSensors = null;
-                capture.allCounters = allCounters;
+                capture.allSamplers = allSamplers;
 
-                // Record some interesting counter values to start the capture:
+                // Record some interesting sampler values to start the capture:
                 capture.markBonus(true);
-                capture.recordCounterValues(Counters.instance.queryInterestingCounters(false));
+                capture.recordSamplerValues(samplers.queryInterestingSamplers(false));
                 capture.markBonus(false);
             }
         }

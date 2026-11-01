@@ -119,20 +119,21 @@ public class Sk {
     }
 
     /**
-     * Set the list of counters to be periodically sampled and recorded into the capture. By
+     * Set the list of samplers to be periodically queried and recorded into the capture. By
      * default, the current draws of all hubs are recorded, as well as the current draw of the
-     * main power rail if a goBilda Floodgate sensor is connected to an analog input and named
-     * "floodgateSensor". Counters are sampled every 100 ms and each sample can take up to
+     * main power rail if a goBilda Floodgate sensor is connected to an analog input named
+     * "floodgateSensor". Samplers are queried every 100 ms and each sample can take up to
      * 2 ms. The sampling is done from a thread that is different from the op mode thread, but
      * the I/O acquires a lock within FTC's code that will block hardware device I/O operations
      * of the main thread.
      *
-     * @param ids Specify a list of counters to be sampled. The ID can be found in the graph
-     *            list of Sidekick's Central window. For example, the counter
+     * @param ids Specify a list of samplers to be queried. The ID can be found in the graph
+     *            list of Sidekick's Central window. For example, the sampler
      *            "floodgateSensor.current" is the ID for the Floodgate current draw value.
-     *            If no IDs are specified, no counters will be automatically sampled (although
-     *            this can be overridden by enabling a graph in Sidekick's Central window).
-     * @see #getCounters(String...)
+     *            If no IDs are specified, no sampling will automatically occur (although
+     *            this can be overridden at run-time by adding a sampler in Sidekick's Central
+     *            window).
+     * @see #querySamplers(String...)
      */
     public static void setSamplers(String... ids) {
         if (Sidekick.isEnabled) {
@@ -325,25 +326,25 @@ public class Sk {
     }
 
     /**
-     * Query the specified counters. The results are recorded into the Sidekick capture so
+     * Query the specified samplers. The results are recorded into the Sidekick capture so
      * calling this can be useful even if your code doesn't look at the return values because
      * it lets Sidekick sample at a different rate than setSamplers() does. It's better to make
      * one call to this method with several IDs than to call this method several times because one
      * (often computationally expensive) query to the hardware can often provide results for more
-     * than one counter.
+     * than one sampler.
      *
-     * @param ids Specify a list of counters to be sampled. The ID can be found in the graph
-     *            list of Sidekick's Central window. For example, the counter
+     * @param ids Specify a list of samplers to be queried. The ID can be found in the graph
+     *            list of Sidekick's Central window. For example, the sampler
      *            "system.temperature" is the temperature of the Robot Controller processor.
-     * @return An array of the values from the specified counters. A value will be null if the
-     *         requested counter doesn't exist. Temperatures are always in Celsius; other units
-     *         are the same as used by graphs in Sidekick's Central window.
+     * @return An array of the values from the specified samplers. A value will be null if the
+     *         requested sampler doesn't exist. Temperatures are always in Celsius; other units
+     *         are the same as used by sampler graphs in Sidekick's Central window.
      * @see #setSamplers(String...)
      */
-    public static Double[] getCounters(String... ids) {
+    public static Double[] querySamplers(String... ids) {
         Double[] result = {};
         if (Capture.instance != null) {
-            result = Capture.instance.getCounters(ids);
+            result = Capture.instance.querySamplers(ids);
         }
         return result;
     }

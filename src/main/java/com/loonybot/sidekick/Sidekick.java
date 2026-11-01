@@ -18,8 +18,6 @@ import com.qualcomm.robotcore.eventloop.opmode.OpModeManagerImpl;
 import com.qualcomm.robotcore.eventloop.opmode.OpModeManagerNotifier;
 import com.qualcomm.robotcore.eventloop.opmode.OpModeRegistrar;
 import com.qualcomm.robotcore.hardware.HardwareMap;
-import com.qualcomm.robotcore.robocol.Command;
-import com.qualcomm.robotcore.robocol.RobocolDatagram;
 
 import org.firstinspires.ftc.ftccommon.external.OnCreate;
 import org.firstinspires.ftc.ftccommon.external.OnCreateEventLoop;
@@ -28,9 +26,6 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
 import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
-import org.firstinspires.ftc.robotcore.internal.network.CallbackResult;
-import org.firstinspires.ftc.robotcore.internal.network.NetworkConnectionHandler;
-import org.firstinspires.ftc.robotcore.internal.network.RecvLoopRunnable;
 import org.firstinspires.ftc.robotcore.internal.opmode.OpModeMeta;
 import org.objenesis.Objenesis;
 import org.objenesis.ObjenesisStd;
@@ -39,8 +34,6 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IllegalFormatException;
@@ -56,30 +49,6 @@ import fi.iki.elonen.NanoWSD;
 /// OpMode notification types.
 enum OpModeNotification { PRE_INIT, PRE_START, POST_STOP }
 enum ApiRequestedState { NOT_CALLED, ENABLED, DISABLED }
-
-/// Class for hooking gamepad callbacks.
-class ReceiveLoopCallbacks implements RecvLoopRunnable.RecvLoopCallback {
-    /// Safely return the current capture object, if any.
-    Capture getCapture() {
-        synchronized(Sidekick.sidekickLock) {
-            return Capture.instance;
-        }
-    }
-    @Override public CallbackResult gamepadEvent(RobocolDatagram packet) {
-        Capture capture = getCapture();
-        if (capture != null) {
-            capture.recordGamepad(packet.getData());
-        }
-        return CallbackResult.NOT_HANDLED;
-    }
-    @Override public CallbackResult reportGlobalError(String error, boolean recoverable) { return CallbackResult.NOT_HANDLED; }
-    @Override public CallbackResult packetReceived(RobocolDatagram packet) { return CallbackResult.NOT_HANDLED; }
-    @Override public CallbackResult peerDiscoveryEvent(RobocolDatagram packet) { return CallbackResult.NOT_HANDLED; }
-    @Override public CallbackResult heartbeatEvent(RobocolDatagram packet) { return CallbackResult.NOT_HANDLED; }
-    @Override public CallbackResult commandEvent(Command command) { return CallbackResult.NOT_HANDLED; }
-    @Override public CallbackResult telemetryEvent(RobocolDatagram packet) { return CallbackResult.NOT_HANDLED; }
-    @Override public CallbackResult emptyEvent(RobocolDatagram packet) { return CallbackResult.NOT_HANDLED; }
-}
 
 /// Core Sidekick class whose single instantiation persists for the duration of the robot being
 /// powered on. Multiple captures may be instantiated in that time.
@@ -107,6 +76,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     // Sidekick uses threads with these names:
     final static String SAMPLE_WORKER_THREAD_NAME = "Sidekick Sample Worker";
     final static String FILE_WORKER_THREAD_NAME = "Sidekick File Worker";
+    final static String GAMEPAD_WORKER_THREAD_NAME = "Sidekick Gamepad Worker";
     final static String VIDEO_CAPTURE_THREAD_NAME = "Sidekick Video Capture";
 
     /// Structure to track non-Sidekick threads that the user has registered.
@@ -148,9 +118,9 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     // State:
     FtcEventLoop eventLoop; // For creating our own HardwareMap and controlling opModes
     SampleWorker sampleWorker; // Periodic thread for periodic work
+    GamepadWorker gamepadWorker; // Period thread for recording gamepad input
     FileWorker fileWorker; // File writing thread
     boolean oneTimeOpModeInitializationDone; // True if we've done one-time opMode initialization
-    boolean isGamepadHooked; // True if the gamepad is successfully hooked
     boolean isDefaultOpMode; // True if the default opMode is active
     BiFunction<Integer, Object, Object> emulatorCallback; // Emulator enlightenment callback, if any
     ProxyBuilder proxyBuilder; // Byte Buddy proxy builder
@@ -158,12 +128,11 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     HashMap<Class<?>, SerializerInfo<?>> serializersMap = new HashMap<>(); // Map of serializers for custom types
     LinkedList<SerializerInfo<?>> serializersList = new LinkedList<>(); // List of all serializers
     Set<Integer> suppressedIssues = new HashSet<>(); // Issue codes that the user wants suppressed
-    ReceiveLoopCallbacks receiveLoopCallbacks = new ReceiveLoopCallbacks(); // For Gamepad hooks
     OpModeNotification expectedNotification = OpModeNotification.PRE_INIT; // The expected next OpMode notification
     HashMap<Thread, ThreadRegister> threadRegistry = new HashMap<>(); // Registered threads
     String captureName = ""; // Name specified by the user for the current capture; includes ".sidekick"
     int retentionDays = 7; // Default retention period, in days
-    String[] userSetSamplers = null; // If non-null, the user has specified a set of counter IDs to sample
+    String[] userSetSamplers = null; // If non-null, the user has specified a set of sampler IDs to query
 
     final private NanoWSD server = new NanoWSD(WEB_SOCKET_PORT) {
         @Override protected WebSocket openWebSocket(IHTTPSession handshake) {
@@ -258,11 +227,11 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
         }
     }
 
-    /// API to set the list of counters to be sampled and recorded into captures.
+    /// API to set the list of samplers to be sampled and recorded into captures.
     void setSamplers(String... ids) {
         synchronized(sidekickLock) {
             userSetSamplers = ids;
-            Realtime.forceActiveCounterUpdate();
+            Realtime.forceActiveSamplerUpdate();
         }
     }
 
@@ -398,6 +367,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
             // Start the worker threads:
             instance.fileWorker = new FileWorker(instance.proxyBuilder);
             instance.sampleWorker = new SampleWorker();
+            instance.gamepadWorker = new GamepadWorker();
             isInitialized = true;
         }
     }
@@ -476,26 +446,6 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
 
     /// One-time initialization we do in preparation for the first opMode.
     void oneTimeOpModeInitialization() {
-        // Register a gamepad callback so that the system notifies us of gamepad updates.
-        // Do this only on the first OpMode, not subsequent ones.
-        NetworkConnectionHandler connectionHandler = NetworkConnectionHandler.getInstance();
-        try {
-            // Call connectionHandler.theRecvLoopCallback.push(gamepadCallback);
-            Field recvLoopCallbackField = connectionHandler.getClass().getDeclaredField(
-                    "theRecvLoopCallback");
-            recvLoopCallbackField.setAccessible(true);
-            Object recvLoopCallback = recvLoopCallbackField.get(connectionHandler);
-            if (recvLoopCallback != null) {
-                Class<?> recvLoopCallbackChainerClass = recvLoopCallback.getClass();
-                Method pushMethod = recvLoopCallbackChainerClass.getDeclaredMethod(
-                        "push", RecvLoopRunnable.RecvLoopCallback.class);
-                pushMethod.setAccessible(true);
-                pushMethod.invoke(recvLoopCallback, receiveLoopCallbacks);
-                isGamepadHooked = true;
-            }
-        } catch (NoSuchFieldException | IllegalAccessException | NoSuchMethodException |
-                 InvocationTargetException ignored) { }
-
         // Register default serializers:
         registerSerializer(
                 new Pose2D(DistanceUnit.INCH, 0, 0, AngleUnit.RADIANS, 0),
@@ -547,11 +497,13 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
                 } catch (InterruptedException ignored) {}
 
                 // Create the capture:
-                capture = new Capture(instance, opMode, eventLoop.getOpModeManager(), isGamepadHooked);
+                capture = new Capture(instance, opMode, eventLoop.getOpModeManager());
             }
         }
-        // Now that we're no longer holding the Sidekick lock, notify the sample worker:
+
+        // Now that we're no longer holding the Sidekick lock, notify the worker threads:
         sampleWorker.initializeNewOpMode(originalHardwareMap, capture);
+        gamepadWorker.initializeNewOpMode(opMode, capture);
     }
 
     /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the user has just pressed

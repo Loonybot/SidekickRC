@@ -3,10 +3,12 @@
 /// Copyright James Goossen.
 package com.loonybot.sidekick;
 
+import static com.loonybot.sidekick.Sidekick.MIN_STORAGE_MBS;
 import static com.loonybot.sidekick.Sidekick.SD_CARD_PATH;
 import static com.loonybot.sidekick.Sidekick.SUBDIRECTORY;
 import static java.lang.System.nanoTime;
 
+import android.os.StatFs;
 import android.system.ErrnoException;
 import android.system.Os;
 
@@ -24,6 +26,8 @@ import java.io.FilenameFilter;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -308,22 +312,90 @@ class FileWorker {
     }
 
     ///---------------------------------------------------------------------------------------------
-    /// Everything below is callable from other threads.
+    /// Static helpers.
 
-    /// Get the date and time from the final capture name.
-    /// Converts "2024-11-25 [17.37pm] #1 [176s] TeleOp.sidekick" to "2024-11-25 [17.37pm]".
+    /// Get the date and time from the final capture name. Converts
+    /// "1234-A-RC 2024-11-25 [17.37pm] #1 [176s] TeleOp.sidekick" to "1234-A-RC 2024-11-25 [17.37pm]".
     /// For "Incomplete" captures with no hash, it returns the complete name.
-    static String getDateAndTimeFromCaptureName(String captureName) {
+    static String getBaseNameFromCaptureName(String captureName) {
         int hashIndex = captureName.indexOf(" #");
         return (hashIndex != -1) ? captureName.substring(0, captureName.indexOf(" #")) : captureName;
     }
 
-    /// Start the worker thread and pre-allocate some buffers.
-    FileWorker(ProxyBuilder proxyBuilder) {
-        this.proxyBuilder = proxyBuilder;
-        new Thread(this::loop).start();
-        for (int i = 0; i < PRE_ALLOCATED_CHUNK_COUNT; i++) {
-            freeBufferPool.offer(ByteBuffer.allocateDirect(CHUNK_SIZE));
+    /// Delete the oldest captures (.sidekick and companion files) until there's sufficient space
+    /// for a new capture.
+    static void clearSpaceForNewCapture() {
+        StatFs stat = new StatFs(Sidekick.SD_CARD_PATH);
+        File sidekickDirectory = new File(Sidekick.SUBDIRECTORY);
+
+        // Get all files in the sidekick directory, not just .sidekick files. We don't delete
+        // by .sidekick and its companion files in case some companion files should have to get
+        // left behind after the .sidekick file is gone.
+        File[] sidekickFiles = sidekickDirectory.listFiles();
+        if (sidekickFiles != null) {
+            // Sort the files by modified time, oldest first:
+            Arrays.sort(sidekickFiles, Comparator.comparingLong(File::lastModified));
+
+            // Delete any files older than the specified number of retention days. Note that this
+            // will delete all files that start with '1900-' which can be created when op modes
+            // are launched without a connected Driver Station to supply the robot with the current
+            // date and time. (This can happen with FTC Dashboard and probably also Panels.)
+            // Multiple files with '1900-' mess up our logic for downloading the newest capture
+            // anyway.
+            int retentionDays = Sidekick.instance.retentionDays;
+            long cutoffMillis = System.currentTimeMillis() - retentionDays * 24L * 60L * 60L * 1000L;
+            for (File f : sidekickFiles) {
+                long lastModified = f.lastModified();
+                if ((lastModified != 0) && (lastModified < cutoffMillis)) {
+                    Sidekick.logI("Deleting " + f.getName());
+                    f.delete();
+                }
+            }
+
+            // Now if that wasn't enough, delete the oldest files until there's sufficient space:
+            for (File f: sidekickFiles) {
+                if (stat.getAvailableBytes() >= MIN_STORAGE_MBS*1024*1024)
+                    break; // ====>
+                Sidekick.logI("Deleting " + f.getName());
+                f.delete();
+            }
+        }
+    }
+
+    /// Delete a Sidekick capture file and all its companion files.
+    static void deleteSidekickFileAndCompanions(File sidekickFile) {
+        if (sidekickFile != null && sidekickFile.exists()) {
+            String baseName = FileWorker.getBaseNameFromCaptureName(sidekickFile.getName());
+            File sidekickDirectory = new File(Sidekick.SUBDIRECTORY);
+            File[] companionFiles = sidekickDirectory.listFiles((d, name) ->
+                    name.startsWith(baseName)
+            );
+            if (companionFiles != null) {
+                for (File f : companionFiles) {
+                    Sidekick.logI("Deleting " + f.getName());
+                    f.delete();
+                }
+            }
+        }
+    }
+
+    /// Delete all captures dated 1969 or 1970. It's impossible to determine the true age of
+    /// captures that are dated 1969 or 1970 as those are made when the Control Hub doesn't
+    /// have a Driver Hub connection and an opMode is run by means such as FTC Dashboard. The
+    /// Control Hub doesn't know the current time and date and so uses the start of the Unix
+    /// epoch in these cases, hence the 1969 and 1970. We employ a simple policy to avoid the
+    /// many ambiguities and complications that result: any existing capture dated 1969 or 1970
+    /// is deleted from the Control Hub as soon as a new capture is made. You're free to download
+    /// and save every capture on your PC, though, of course.
+    static void deleteEpochCaptures() {
+        File directory = new File(Sidekick.SUBDIRECTORY);
+        FilenameFilter filter = (dir, name) -> name.endsWith(".sidekick") &&
+                (name.startsWith("1969-") || name.startsWith("1970-"));
+        File[] files = directory.listFiles(filter);
+        if (files != null) {
+            for (File file: files) {
+                deleteSidekickFileAndCompanions(file);
+            }
         }
     }
 
@@ -360,23 +432,15 @@ class FileWorker {
         }
     }
 
-    /// Delete all captures dated 1969 or 1970. It's impossible to determine the true age of
-    /// captures that are dated 1969 or 1970 as those are made when the Control Hub doesn't
-    /// have a Driver Hub connection and an opMode is run by means such as FTC Dashboard. The
-    /// Control Hub doesn't know the current time and date and so uses the start of the Unix
-    /// epoch in these cases, hence the 1969 and 1970. We employ a simple policy to avoid the
-    /// many ambiguities and complications that result: any existing capture dated 1969 or 1970
-    /// is deleted from the Control Hub as soon as a new capture is made. You're free to download
-    /// and save every capture on your PC, though, of course.
-    static void deleteEpochCaptures() {
-        File directory = new File(Sidekick.SUBDIRECTORY);
-        FilenameFilter filter = (dir, name) -> name.endsWith(".sidekick") &&
-                (name.startsWith("1969-") || name.startsWith("1970-"));
-        File[] files = directory.listFiles(filter);
-        if (files != null) {
-            for (File file: files) {
-                file.delete();
-            }
+    ///---------------------------------------------------------------------------------------------
+    /// Everything below is callable from other threads.
+
+    /// Start the worker thread and pre-allocate some buffers.
+    FileWorker(ProxyBuilder proxyBuilder) {
+        this.proxyBuilder = proxyBuilder;
+        new Thread(this::loop).start();
+        for (int i = 0; i < PRE_ALLOCATED_CHUNK_COUNT; i++) {
+            freeBufferPool.offer(ByteBuffer.allocateDirect(CHUNK_SIZE));
         }
     }
 

@@ -214,7 +214,7 @@ class Socket extends NanoWSD.WebSocket {
 
         JsonArray fileArray = new JsonArray();
         for (File file: getCaptureFiles()) {
-            String supplementBaseName = FileWorker.getDateAndTimeFromCaptureName(file.getName());
+            String supplementBaseName = FileWorker.getBaseNameFromCaptureName(file.getName());
             File limelightFile = new File(Sidekick.SUBDIRECTORY + "/" + supplementBaseName + ".lvc");
             File screenFile = new File(Sidekick.SUBDIRECTORY + "/" + supplementBaseName + ".mp4");
 
@@ -382,7 +382,7 @@ class Socket extends NanoWSD.WebSocket {
         // Their names are simply the 'dateAndTime' string. The final capture name begins with
         // 'dateAndTime' but then adds other information, such as the run number and run time.
         // Derive the original supplement base name from the final capture name:
-        String supplementBaseName = FileWorker.getDateAndTimeFromCaptureName(captureName);
+        String supplementBaseName = FileWorker.getBaseNameFromCaptureName(captureName);
 
         File limelightFile = new File(Sidekick.SUBDIRECTORY + "/" + supplementBaseName + ".lvc");
         File screenFile = new File(Sidekick.SUBDIRECTORY + "/" + supplementBaseName + ".mp4");
@@ -496,28 +496,37 @@ class Socket extends NanoWSD.WebSocket {
         sendJson(resetAdbResponse);
     }
 
-    /// Return a list of available realtime counters.
-    void handleQueryRealtimeCounters(JsonObject request) {
+    /// Return a list of available realtime samplers.
+    void handleQueryRealtimeSamplers(JsonObject request) {
         JsonObject response = createResponse(request);
 
-        // Return an array of descriptors for each available realtime counters:
-        List<CounterDescriptor> descriptors = Realtime.getSupportedCounters();
-        JsonArray counters = new JsonArray();
-        for (CounterDescriptor descriptor: descriptors) {
-            JsonObject counter = new JsonObject();
-            counter.addProperty("id", descriptor.id);
-            counter.addProperty("description", descriptor.description);
-            counter.addProperty("unit", descriptor.unit);
-            counter.addProperty("is_integer", descriptor.isInteger);
-            counter.addProperty("min", 0);
-            counter.addProperty("max", 0);
-            counters.add(counter);
+        // Return an array of descriptors for each available realtime sampler:
+        List<SamplerDescriptor> descriptors = Realtime.getSupportedSamplers();
+        JsonArray samplers = new JsonArray();
+        for (SamplerDescriptor descriptor : descriptors) {
+            JsonObject sampler = new JsonObject();
+            sampler.addProperty("id", descriptor.id);
+            sampler.addProperty("description", descriptor.description);
+            sampler.addProperty("unit", descriptor.unit);
+            sampler.addProperty("is_integer", descriptor.isInteger);
+            sampler.addProperty("min", 0);
+            sampler.addProperty("max", 0);
+            samplers.add(sampler);
         }
-        response.add("counters", counters);
+        response.add("counters", samplers);
+
+        // Return an array of ID strings of the baseline samplers:
+        List<String> baselineIds = Realtime.getBaselineSamplerIds();
+        JsonArray baselineSamplers = new JsonArray();
+        for (String baselineId : baselineIds) {
+            baselineSamplers.add(baselineId);
+            Sidekick.logI("  Baseline ID: " + baselineId); // @@@
+        }
+        response.add("baseline", baselineSamplers);
         sendJson(response);
     }
 
-    /// Subscribe to the requested realtime counters; unsubscribe if the list is empty.
+    /// Subscribe to the requested realtime samplers; unsubscribe if the list is empty.
     void handleSubscribeRealtime(JsonObject request) {
         JsonObject response = createResponse(request);
         String[] ids = request.has("ids")
@@ -528,29 +537,29 @@ class Socket extends NanoWSD.WebSocket {
         sendJson(response);
     }
 
-    /// Push realtime counter data to the PC.
-    void pushRealtimeCounters(Set<String> subscribedCounters, HashMap<String, List<Float>> sampleData) {
+    /// Push realtime sampler data to the PC.
+    void pushRealtimeSamplers(Set<String> subscribedSamplers, HashMap<String, List<Float>> sampleData) {
         JsonObject message = createPush("realtime_sample");
-        JsonArray counters = new JsonArray();
-        for (String subscribedCounter: subscribedCounters) {
-            List<Float> valuesList = sampleData.get(subscribedCounter);
+        JsonArray samplers = new JsonArray();
+        for (String subscribedSampler: subscribedSamplers) {
+            List<Float> valuesList = sampleData.get(subscribedSampler);
             if (valuesList != null) {
                 JsonArray values = new JsonArray();
                 for (Float value : valuesList) {
                     values.add(value);
                 }
-                JsonObject counter = new JsonObject();
-                counter.addProperty("id", subscribedCounter);
-                counter.add("values", values);
-                counters.add(counter);
+                JsonObject sampler = new JsonObject();
+                sampler.addProperty("id", subscribedSampler);
+                sampler.add("values", values);
+                samplers.add(sampler);
             }
         }
 
-        message.add("counters", counters);
+        message.add("counters", samplers);
 
         // The refresh interval is how many realtime_sample messages it takes to refresh any
         // device sample. Because it's a hint, we don't worry about synchronization.
-        message.addProperty("refresh_interval", Counters.instance.getRefreshInterval());
+        message.addProperty("refresh_interval", Samplers.instance.getRefreshInterval());
         sendJson(message);
     }
 
@@ -655,7 +664,7 @@ class Socket extends NanoWSD.WebSocket {
                     handleResetAdb(payload);
                     break;
                 case "query_realtime_counters":
-                    handleQueryRealtimeCounters(payload);
+                    handleQueryRealtimeSamplers(payload);
                     break;
                 case "subscribe_realtime":
                     handleSubscribeRealtime(payload);

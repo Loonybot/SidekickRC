@@ -3,7 +3,6 @@
 /// Copyright James Goossen.
 package com.loonybot.sidekick;
 
-import static com.loonybot.sidekick.Sidekick.MIN_STORAGE_MBS;
 import static com.loonybot.sidekick.Sidekick.TEMP_LOGCAT_FILE;
 import static java.lang.System.nanoTime;
 
@@ -25,7 +24,6 @@ import com.qualcomm.hardware.lynx.LynxDigitalChannelController;
 import com.qualcomm.hardware.lynx.LynxModule;
 import com.qualcomm.hardware.lynx.commands.core.LynxGetBulkInputDataResponse;
 import com.qualcomm.hardware.sparkfun.SparkFunOTOS;
-import com.qualcomm.robotcore.eventloop.EventLoopManager;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
@@ -216,7 +214,7 @@ class Signature {
     static final int DEVICE_DESCRIPTORS     = 0x9B3A4F5E;
     static final int THREAD_DESCRIPTORS     = 0x1A2B3C4D;
     static final int SERIALIZER_DESCRIPTORS = 0x4D3C2B1A;
-    static final int COUNTER_DESCRIPTORS    = 0xDEADBEEF;
+    static final int SAMPLER_DESCRIPTORS    = 0xDEADBEEF;
     static final int CONFIGURATION          = 0xC0FFEE00;
 }
 
@@ -271,7 +269,7 @@ class RecordId {
     static final int PAINT                                 = 31;
     static final int NOTE_STRING                           = 32;
     static final int LOOP                                  = 33;
-    static final int COUNTERS                              = 34;
+    static final int SAMPLER_VALUES                        = 34;
     static final int MODULE0_BULK_DATA                     = 35;
     static final int MODULE1_BULK_DATA                     = 36;
     static final int MODULE2_BULK_DATA                     = 37;
@@ -806,7 +804,6 @@ class Capture {
     Sidekick sidekick; // Reference to the corresponding Sidekick object
     OpMode opMode; // Reference to the currently active opMode
     SkHardwareMap hardwareMap; // Sidekick's enhanced hardware map
-    SkTelemetry telemetry; // Sidekick's enhanced telemetry object
     ByteBuffer chunk; // Current chunk given by Persistence for writing data to
     int chunkRemaining; // Amount of bytes remaining in the current chunk
     Date initDate; // Date and time at which the OpMode was initialized
@@ -833,7 +830,7 @@ class Capture {
     LinkedList<ThreadDescriptor> threadDescriptorList = new LinkedList<>(); // List of all descriptors, zero is reserved
     HashMap<LynxModule, LynxModuleState> lynxModuleMap = new HashMap<>(); // Not all Lynx modules may be present
     DynamicDescriptor voltageSensorDescriptor; // Lazily-created descriptor for the voltage sensor
-    List<CounterDescriptor> allCounters; // List of all possible counters
+    List<SamplerDescriptor> allSamplers; // List of all possible samplers
     boolean majorError; // True if an error was recorded that will prevent the capture from loading
     int processJiffyStart; // The process's jiffy count at the start of the capture
     int processJiffyDuration; // The process's total jiffy count, determined at the end of the capture
@@ -872,7 +869,7 @@ class Capture {
     }
 
     /// The Capture's only constructor.
-    Capture(Sidekick sidekick, @NonNull OpMode opMode, OpModeManagerImpl opModeManager, boolean isGamepadHooked) {
+    Capture(Sidekick sidekick, @NonNull OpMode opMode, OpModeManagerImpl opModeManager) {
         assert(Thread.holdsLock(sidekickLock));
         instance = this;
 
@@ -898,7 +895,7 @@ class Capture {
         }
 
         // Do all the real initialization work:
-        initializeCapture(opModeManager, isGamepadHooked);
+        initializeCapture(opModeManager);
     }
 
     /// Register a new thread.
@@ -1443,16 +1440,16 @@ class Capture {
         }
     }
 
-    /// Record counter values.
-    void recordCounterValues(List<CounterValue> counters) {
-        int counterCount = counters.size();
-        if (counterCount != 0) {
+    /// Record sampler values.
+    void recordSamplerValues(List<SamplerValue> samplerValues) {
+        int samplerCount = samplerValues.size();
+        if (samplerCount != 0) {
             synchronized (sidekickLock) {
-                if (beginRecord(RecordId.COUNTERS, 2 + 6 * counterCount)) {
-                    chunk.putShort((short) counterCount);
-                    for (CounterValue counter : counters) {
-                        chunk.putShort((short) counter.index);
-                        chunk.putFloat((float) counter.value);
+                if (beginRecord(RecordId.SAMPLER_VALUES, 2 + 6 * samplerCount)) {
+                    chunk.putShort((short) samplerCount);
+                    for (SamplerValue sampleValue : samplerValues) {
+                        chunk.putShort((short) sampleValue.index);
+                        chunk.putFloat((float) sampleValue.value);
                     }
                     assertChunk();
                 }
@@ -1477,13 +1474,13 @@ class Capture {
         }
     }
 
-    /// Record and return the current values of the given counters.
-    Double[] getCounters(String[] ids) {
-        // Collect the counter values without holding a lock:
-        List<CounterValue> values = Counters.instance.collectSet(ids);
+    /// Record and return the current values of the given sampler.
+    Double[] querySamplers(String[] ids) {
+        // Collect the sampler values without holding a lock:
+        List<SamplerValue> values = Samplers.instance.collectSet(ids);
 
         // Record all values into the capture:
-        recordCounterValues(values);
+        recordSamplerValues(values);
 
         // Prepare the result, remembering that collectSet() may have returned more values than we
         // needed, and that some IDs may have been invalid:
@@ -1777,19 +1774,19 @@ class Capture {
         assertChunk();
     }
 
-    /// Serialize system counter descriptors.
-    void serializeCounterDescriptors() {
+    /// Serialize system sampler descriptors.
+    void serializeSamplerDescriptors() {
         if ((chunkRemaining -= 6) < 0)
             nextChunk();
-        chunk.putInt(Signature.COUNTER_DESCRIPTORS);
-        chunk.putShort((short) allCounters.size());
-        for (CounterDescriptor counter : allCounters) {
+        chunk.putInt(Signature.SAMPLER_DESCRIPTORS);
+        chunk.putShort((short) allSamplers.size());
+        for (SamplerDescriptor sampler : allSamplers) {
             if ((chunkRemaining -= 1) < 0) {
                 nextChunk();
             }
-            putString(counter.id);
-            putString(counter.unit);
-            chunk.put((byte) (counter.isInteger ? 1 : 0));
+            putString(sampler.id);
+            putString(sampler.unit);
+            chunk.put((byte) (sampler.isInteger ? 1 : 0));
         }
         assertChunk();
     }
@@ -2069,61 +2066,10 @@ class Capture {
         }
     }
 
-    /// Delete the oldest captures until there's sufficient space for a new capture.
-    void clearSpaceForNewCapture() {
-        StatFs stat = new StatFs(Sidekick.SD_CARD_PATH);
-        File directory = new File(Sidekick.SUBDIRECTORY);
-        File[] sidekickFiles = directory.listFiles((d, name) ->
-                name.endsWith(".sidekick")
-        );
-        if (sidekickFiles != null) {
-            Arrays.sort(sidekickFiles, (a, b) ->
-                    a.getName().compareToIgnoreCase(b.getName())
-            );
-
-            // Delete all Sidekick files that start with '1900-'. Sidekick captures will be
-            // created with that year only when OpModes are launched without having a connected
-            // Driver Station to supply the robot with the current date and time. (I think
-            // this can happen only with FTC Dashboard.) Multiple files with '1900-' mess
-            // up our logic for downloading the newest capture so we contrive to ensure that
-            // there is a maximum of one such file:
-            for (File f: sidekickFiles) {
-                if (f.getName().startsWith("1900-")) {
-                    Sidekick.logI("Deleting " + f.getName());
-                    f.delete();
-                } else {
-                    break; // ====>
-                }
-            }
-
-            // Delete any files older than the specified number of retention days:
-            int retentionDays = Sidekick.instance.retentionDays;
-            long cutoffMillis = System.currentTimeMillis() - retentionDays * 24L * 60L * 60L * 1000L;
-            for (File f : sidekickFiles) {
-                long lastModified = f.lastModified();
-                if ((lastModified != 0) && (lastModified < cutoffMillis)) {
-                    Sidekick.logI("Deleting " + f.getName());
-                    f.delete();
-                }
-            }
-
-            // Now delete the oldest files until there's sufficient space:
-            for (File f: sidekickFiles) {
-                if (stat.getAvailableBytes() >= MIN_STORAGE_MBS*1024*1024)
-                    break; // ====>
-                Sidekick.logI("Deleting " + f.getName());
-                f.delete();
-            }
-        }
-    }
-
     /// Initialize to begin capturing.
-    void initializeCapture(OpModeManagerImpl opModeManager, boolean isGamepadHooked) {
+    void initializeCapture(OpModeManagerImpl opModeManager) {
         assert(Thread.holdsLock(sidekickLock));
-        clearSpaceForNewCapture();
-        if (!isGamepadHooked) {
-            minorError("Gamepad");
-        }
+        FileWorker.clearSpaceForNewCapture();
 
         // Initialize the 0th entry of the thread descriptor list to be reserved:
         threadDescriptorList.add(new ThreadDescriptor(0, "reserved", 0, 0, false));
@@ -2138,16 +2084,13 @@ class Capture {
         chunk.putInt(Signature.ARCHIVE_RECORDS);
         chunkRemaining = chunk.remaining();
 
-        // Replace hardwareMap with our own implementation:
+        // Replace key opMode objects with proxy implementations:
         if (!(opMode.hardwareMap instanceof SkHardwareMap)) {
             hardwareMap = new SkHardwareMap(opMode.hardwareMap, this, opModeManager);
             opMode.hardwareMap = hardwareMap;
         }
-
-        // Wrap telemetry with our proxy:
         if (!(opMode.telemetry instanceof Capture.SkTelemetry)) {
-            telemetry = new SkTelemetry(opMode.telemetry);
-            opMode.telemetry = telemetry;
+            opMode.telemetry = new SkTelemetry(opMode.telemetry);
         }
 
         initializeLynxModuleInfo(); // Lynx Module info used for Bulk Read processing
@@ -2168,7 +2111,7 @@ class Capture {
             // Record interesting values. The user didn't ask for these queries so mark
             // them as bonus:
             markBonus(true);
-            recordCounterValues(Counters.instance.queryInterestingCounters(true));
+            recordSamplerValues(Samplers.instance.queryInterestingSamplers(true));
             recordMotorEndPositions();
             markBonus(false);
 
@@ -2213,7 +2156,7 @@ class Capture {
             serializeManifest();
             serializeConfiguration();
             serializeStringTokens();
-            serializeCounterDescriptors();
+            serializeSamplerDescriptors();
             serializeDeviceDescriptors();
             serializeSerializerDescriptors();
             serializeDynamicDescriptors(); // Must come last
@@ -2268,7 +2211,7 @@ class Capture {
         recordPaint(new Paint(canvas), CanvasFlags.ROTATED_FIELD | CanvasFlags.INFERRED);
     }
 
-    /// Add data from a gamepad input packet to the capture, modeled off [EventLoopManager#gamepadEvent].
+    /// Add data from a gamepad input packet to the capture.
     void recordGamepad(byte[] input) {
         final int GAMEPAD_FLOAT_COUNT = 6; // Gamepad data always has 6 floats
 
