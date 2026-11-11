@@ -328,6 +328,14 @@ enum BusType {
     OTHER // Can be presumed to be an ethernet device
 }
 
+/// Child identifiers.
+enum ChildId {
+    NONE,
+    LL_RESULT, // LLResult
+    LL_STATUS, // LLResult
+    SERVO_CONTROLLER, // ServoController
+}
+
 /// Information about the Lynx module, for storing in the manifest.
 class LynxJson {
     String name; // Name of the Lynx module
@@ -418,18 +426,6 @@ class DeviceClassInfo {
     boolean isLimelight; /// True if the associated driver is [Limelight3A]
 }
 
-/// This structure represents derivatives of device classes. An example is the [LLResult] class
-/// returned by [Limelight3A#getLatestResult]; we want to capture its method calls just like we
-/// do the [Limelight3A] class itself.
-class DeviceChild {
-    Class<?> deviceClass; // Device class, e.g., Limelight3A
-    Class<?> childClass; // Derivative class, e.g., LLResult
-    DeviceChild(Class<?> deviceClass, Class<?> childClass) {
-        this.deviceClass = deviceClass;
-        this.childClass = childClass;
-    }
-}
-
 /// Principal class responsible for creating the capture.
 @SuppressWarnings({"ReassignedVariable", "ResultOfMethodCallIgnored"})
 class Capture {
@@ -459,13 +455,13 @@ class Capture {
     class DynamicDescriptor {
         String methodName; // Name of the method, empty for data record descriptors
         int deviceId; /// IDs the associated device, index into [Capture#deviceClassArray], not used for data record descriptors
-        int childId; // If non-zero, this is a child class of the associated type
+        ChildId childId = ChildId.NONE; // If not NONE, this method *is* a child class of the associated type
+        ChildId wrapId; // If not NONE, this method *returns* a child class of the associated type
         int maxInstances; // Maximum number of instances associated with this record
         int recordLength; // Length, in bytes, of the arguments for each SDK call
         List<Consumer<Object>> paramPutters; // Consumers for serializing every argument
         Consumer<Object> resultPutter; // Consumer for serializing the return value
         int interceptorFlags; /// Flags indicating special handling by interceptor [Interceptor.Flags]
-        int wrapId; // If the method returns a child, wrap it with this ID
         LynxModuleState lynxState; // If a Lynx bulk reader, this is the associated state
 
         int recordId; /// Base 16-bit identifier of this record type ([RecordId] for fixed definition records)
@@ -561,16 +557,12 @@ class Capture {
                     }
                 }
             }
-            for (int i = 1; i < DEVICE_CHILDREN.length; i++) { // Index of zero is reserved
-                DeviceChild deviceChild = DEVICE_CHILDREN[i];
-                // If the object is of the specified device class, and if the method returns the
-                // specified derivative class, then wrap the result:
-                if ((deviceChild.deviceClass.isAssignableFrom(context.originalObject.getClass())) &&
-                    (deviceChild.childClass.isAssignableFrom(method.getReturnType()))) {
-                    interceptorFlags |= Interceptor.Flags.WRAP_CHILD;
-                    wrapId = i;
-                    break;
-                }
+
+            // If the method returns a class that we special-case, mark it as such:
+            ChildId proxyId = childIds.get(method.getReturnType());
+            if (proxyId != null) {
+                interceptorFlags |= Interceptor.Flags.WRAP_CHILD;
+                wrapId = proxyId;
             }
         }
 
@@ -779,13 +771,6 @@ class Capture {
     final static int MAX_LYNX_COUNT = 4; // Maximum number of Lynx modules for bulk reads
     final static HashSet<String> BULK_READER_METHODS = // Methods that can do Lynx module bulk reads
             new HashSet<>(Arrays.asList("getCurrentPosition", "isBusy", "getVelocity", "isOverCurrent", "getVoltage", "getState"));
-    final static DeviceChild[] DEVICE_CHILDREN = { // Hardware device children that will be wrapped
-            new DeviceChild(Void.class, Void.class), // 0 entry reserved for non-child devices
-            new DeviceChild(Limelight3A.class, LLResult.class),
-            new DeviceChild(Limelight3A.class, LLStatus.class),
-            new DeviceChild(Servo.class, ServoController.class),
-            new DeviceChild(CRServo.class, ServoController.class),
-    };
     final Object sidekickLock = Sidekick.sidekickLock; // Master synchronization object, same lock object as Sidekick
     final Charset UTF8 = StandardCharsets.UTF_8; // Our standard charset for strings
     final CharsetEncoder utf8Encoder = UTF8.newEncoder();
@@ -813,7 +798,7 @@ class Capture {
     long startUnixTime; // Unix time when Start was pressed, in milliseconds
     long endNanoTime; // Capture end time, in nanoseconds
     String robotName; // E.g., "123-RC"
-    String dateAndTime; // Date and time at which the OpMode was initialized, used for file names
+    String nameDateAndTime; // Root of the capture file name that includes the robot name, date and time
     Section[] sections; // Data on all capture sections
     String lastLogcatTime; // Time that the last logcat was saved (null if none saved yet)
     int opModeTid; // Linux TID of the OpMode thread; zero if not yet known
@@ -823,6 +808,7 @@ class Capture {
         /// called before the next record.
     boolean[] gamepadIsPs4 = new boolean[2]; // False if gamepad is Xbox-compatible, true if PS4
     ArrayList<DeviceClassInfo> deviceClassArray = new ArrayList<>(); /// List of all device classes, index by [DeviceClassInfo#deviceId]
+    Map<Class<?>, ChildId> childIds = new HashMap<>(); // Map device children to their proxy IDs
     Map<SchemaKey, DynamicDescriptor> varargsDescriptors = new HashMap<>(); // Descriptor map for varargs
     HashMap<String, DynamicDescriptor> hardwareMapDescriptors = new HashMap<>(); /// For [#recordHardwareMapGet]
     LinkedList<DynamicDescriptor> allocatedDescriptors = new LinkedList<>(); // List of all descriptors
@@ -875,18 +861,19 @@ class Capture {
 
         this.sidekick = sidekick;
         this.opMode = opMode;
-        this.currentThreadId = Thread.currentThread().getId();
-        this.initDate = new Date();
-        this.initNanoTime = nanoTime();
-        this.initUnixTime = initDate.getTime();
-        this.startNanoTime = initNanoTime; /// This will get overwritten if/when [#markStartTime()] gets called
-        this.startUnixTime = initUnixTime;
+
+        currentThreadId = Thread.currentThread().getId();
+        initDate = new Date();
+        initNanoTime = nanoTime();
+        initUnixTime = initDate.getTime();
+        startNanoTime = initNanoTime; /// This will get overwritten if/when [#markStartTime()] gets called
+        startUnixTime = initUnixTime;
         SimpleDateFormat dateFormatter = new SimpleDateFormat("yyyy-MM-dd '['HH.mmaa']'", Locale.US);
-        this.dateAndTime = dateFormatter.format(initDate).toLowerCase(); // Lower 'AM' to 'am'
 
         InspectionState inspection = new InspectionState();
         inspection.initializeLocal();
-        this.robotName = inspection.deviceName;
+        robotName = inspection.deviceName;
+        nameDateAndTime = robotName + " " + dateFormatter.format(initDate).toLowerCase(); // Lower 'AM' to 'am'
 
         // Initialize the array of file sections to zero:
         this.sections = new Section[Section.COUNT];
@@ -1149,11 +1136,14 @@ class Capture {
         Sidekick.logI(LOGCAT_OP_MODE_START); /// This message syncs [#startNanoTime] with Unix time
 
         // Video recording files have the same root name as the capture; only the extension differs:
-        String videoRootName = Sidekick.SUBDIRECTORY + "/" + dateAndTime;
+        String videoRootName = Sidekick.SUBDIRECTORY + "/" + nameDateAndTime;
 
         // Start Limelight video capture if a Limelight was registered during Init:
         if (limelightAddress != null) {
+            Sidekick.logI("Starting Limelight capture");
             limelightCapture = new LimelightVideo(videoRootName + ".lvc", limelightAddress);
+        } else {
+            Sidekick.logI("No Limelight found");
         }
 
         // Ask a connected PC to potentially start a screen capture via ADB:
@@ -1810,7 +1800,7 @@ class Capture {
                 nextChunk();
             }
             chunk.put((byte) descriptor.deviceId); // Overflow check below
-            chunk.put((byte) descriptor.childId);
+            chunk.put((byte) descriptor.childId.ordinal());
             chunk.put((byte) descriptor.maxInstances);
             putString(descriptor.methodName);
             assertChunk();
@@ -2077,7 +2067,7 @@ class Capture {
 
         // Initialize the file and allocate a chunk for capturing, write the file header, and
         // initialize the archive section:
-        sidekick.fileWorker.submit(new FileWorker.OpenMessage(dateAndTime));
+        sidekick.fileWorker.submit(new FileWorker.OpenMessage(nameDateAndTime));
         chunk = sidekick.fileWorker.getChunk();
         chunk.put(Header.create(false, startUnixTime, sections));
         sections[Section.ARCHIVE].offset = getOffset();
@@ -2173,7 +2163,7 @@ class Capture {
             CountDownLatch limelightDoneLatch = limelightCapture != null ? limelightCapture.doneLatch : null;
             sidekick.fileWorker.submit(new FileWorker.WriteMessage(chunk));
             sidekick.fileWorker.submit(new FileWorker.CloseMessage(sections,
-                    opMode.getClass(), majorError, robotName, dateAndTime, startUnixTime, startNanoTime,
+                    opMode.getClass(), majorError, nameDateAndTime, startUnixTime, startNanoTime,
                     endNanoTime, sidekick.lastRunNumber, limelightDoneLatch, fileDoneLatch));
 
             // Disable any further recording on this capture context:
@@ -2471,7 +2461,7 @@ class Capture {
         }
 
         /// After the original call is made, this logs the call and creates the wrapper Item.
-        SkItem telemetryAddData(String caption, String format, Item originalItem, int lineId, Object... args) {
+        SkItem telemetryAddData(String caption, String format, @NonNull Item originalItem, int lineId, Object... args) {
             synchronized (sidekickLock) {
                 SkItem wrappedItem = new SkItem(originalItem, lineId); // Must be under lock
                 SchemaKey schemaKey = getSchemaKey(args, false, 0);
@@ -3106,11 +3096,17 @@ class Capture {
             // Also pre-create proxy classes for any derivative devices associated with this
             // device. We wouldn't want the first call to limelight.getLatestResult() to hang
             // for hundreds of milliseconds while the robot is actually moving:
-            for (DeviceChild derivative: DEVICE_CHILDREN) {
-                if (derivative.deviceClass.isAssignableFrom(originalClass)) {
-                    sidekick.proxyBuilder.primeCache(derivative.childClass);
-                    /// Error is logged by caller of [ProxyBuilder#getCache]
-                }
+            if (Servo.class.isAssignableFrom(originalClass)) {
+                sidekick.proxyBuilder.primeCache(ServoController.class);
+                childIds.put(ServoController.class, ChildId.SERVO_CONTROLLER); // Must match API return type
+            } else if (CRServo.class.isAssignableFrom(originalClass)) {
+                sidekick.proxyBuilder.primeCache(ServoController.class);
+                childIds.put(ServoController.class, ChildId.SERVO_CONTROLLER); // Must match API return type
+            } else if (Limelight3A.class.isAssignableFrom(originalClass)) {
+                sidekick.proxyBuilder.primeCache(LLResult.class);
+                sidekick.proxyBuilder.primeCache(LLStatus.class);
+                childIds.put(LLResult.class, ChildId.LL_RESULT);
+                childIds.put(LLStatus.class, ChildId.LL_STATUS);
             }
 
             T proxyInstance; // Proxy instance to be created
@@ -3134,7 +3130,7 @@ class Capture {
 
                 // Create the context for this particular device instance, then instantiate:
                 Interceptor.Context context = new Interceptor.Context(this.capture, originalObject,
-                        classInfo, 0, instanceId);
+                        classInfo, ChildId.NONE, instanceId);
                 proxyInstance = instantiateProxy(proxyClass, context, originalObject);
                 if (proxyInstance == null) {
                     minorError("Proxy class");
@@ -3160,7 +3156,8 @@ class Capture {
                 // Do some extra processing for the first Limelight instance we see.
                 if ((originalObject instanceof Limelight3A) && (instanceId == 0)) {
                     // Stash the IP address for video capture at Start:
-                    InetAddress inetAddress = Sidekick.getInstanceField(originalObject, "inetAddress", InetAddress.class);
+                    InetAddress inetAddress = Sidekick.getInstanceField(
+                            originalObject, "inetAddress", InetAddress.class);
                     if (inetAddress != null) {
                         capture.limelightAddress = inetAddress.getHostAddress();
                     } else {
@@ -3195,10 +3192,14 @@ class Capture {
             return proxyInstance;
         }
 
-        /// Wrap a select class returned from a wrapped [HardwareDevice] object.
-        <T> T wrapChild(@NonNull T originalObject, DeviceClassInfo classInfo, int instanceId, int childId) {
+        /// Wrap a select class returned from a wrapped [HardwareDevice] object, as when the user
+        /// calls servo.getController() for purposes of calling pwmDisable(). Because wrapping
+        /// a class with Byte Buddy is so slow, and because children are usually created after
+        /// Start has been pressed, we require the child's class to always be pre-created before
+        /// getting here. See [deviceChildren].
+        <T> T wrapChild(@NonNull T originalObject, Class<?> originalType, DeviceClassInfo classInfo, ChildId childId, int instanceId) {
             if (!(originalObject instanceof SidekickProxy)) {
-                Class<?> proxyClass = sidekick.proxyBuilder.getCache(originalObject.getClass());
+                Class<?> proxyClass = sidekick.proxyBuilder.getCache(originalType);
                 if (proxyClass != null) {
                     // Create the context for this particular device instance and instantiate:
                     Interceptor.Context context = new Interceptor.Context(this.capture,
@@ -3211,7 +3212,7 @@ class Capture {
             }
 
             // Failure case:
-            minorError("Proxy class");
+            minorError("wrapChild");
             return originalObject;
         }
 

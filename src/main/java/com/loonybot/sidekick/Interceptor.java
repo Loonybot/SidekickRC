@@ -40,12 +40,12 @@ public class Interceptor {
         final Capture capture; // Associated Sidekick capture
         final Object originalObject; // Delegate device object
         final DeviceClassInfo classInfo; // Associated device class info
-        final int childId; // ID of the child class with this context; 0 if not a child
+        final ChildId childId; // ID of the child class with this context; NONE if not a child
         final int instanceId; // ID for this device instance, added to recordId at capture
 
         Object wrappedObject; // Proxy device object, set later
 
-        Context(Capture capture, Object originalObject, DeviceClassInfo classInfo, int childId, int instanceId) {
+        Context(Capture capture, Object originalObject, DeviceClassInfo classInfo, ChildId childId, int instanceId) {
             this.capture = capture;
             this.originalObject = originalObject;
             this.classInfo = classInfo;
@@ -107,7 +107,8 @@ public class Interceptor {
         if (descriptor.interceptorFlags != 0) {
             // Wrap the return if it's a child class:
             if (((descriptor.interceptorFlags & Flags.WRAP_CHILD) != 0) && (result != null)) {
-                result = capture.hardwareMap.wrapChild(result, context.classInfo, context.instanceId, descriptor.wrapId);
+                result = capture.hardwareMap.wrapChild(
+                    result, method.getReturnType(), context.classInfo, descriptor.wrapId, context.instanceId);
             }
             // If this method is a Lynx module bulk reader candidate, then record the bulk data:
             if ((descriptor.interceptorFlags & Flags.LYNX_BULK_READ) != 0) {

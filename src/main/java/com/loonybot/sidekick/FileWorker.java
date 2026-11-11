@@ -16,7 +16,6 @@ import com.qualcomm.hardware.lynx.LynxModule;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.AnalogInput;
-import com.qualcomm.robotcore.hardware.DcMotorEx;
 
 import java.io.File;
 import java.io.FileDescriptor;
@@ -27,6 +26,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Locale;
 import java.util.Objects;
@@ -69,8 +69,7 @@ class FileWorker {
         Section[] sections;
         Class<? extends OpMode> opModeClass;
         boolean majorError;
-        String robotName;
-        String dateAndTime;
+        String nameDateAndTime;
         long startUnixTime;
         long startNanoTime;
         long endNanoTime;
@@ -78,14 +77,13 @@ class FileWorker {
         CountDownLatch limelightDoneLatch;
         CountDownLatch fileDoneLatch;
         public CloseMessage(Section[] sections, Class<? extends OpMode> opModeClass, boolean majorError,
-                            String robotName, String dateAndTime, long startUnixTime, long startNanoTime,
+                            String nameDateAndTime, long startUnixTime, long startNanoTime,
                             long endNanoTime, int lastRunNumber, CountDownLatch limelightDoneLatch,
                             CountDownLatch fileDoneLatch) {
             this.sections = sections;
             this.opModeClass = opModeClass;
             this.majorError = majorError;
-            this.robotName = robotName;
-            this.dateAndTime = dateAndTime;
+            this.nameDateAndTime = nameDateAndTime;
             this.startUnixTime = startUnixTime;
             this.startNanoTime = startNanoTime;
             this.endNanoTime = endNanoTime;
@@ -101,10 +99,11 @@ class FileWorker {
     static final int PRE_ALLOCATED_CHUNK_COUNT = 4; // Number of pre-allocated chunk ByteBuffers
     static final int MAX_CAPTURE_SIZE = 100*1024*1024; // Stop capturing at 100 MB
 
-    // We pre-prime the wrappers for the following classes which are pretty much guaranteed to be
-    // used by every TeleOp (the LynxVoltageSensor is used by the system, the Lynx Module to
-    // set the bulk caching mode, and real-time counters may sample AnalogInput):
-    static final Class<?>[] PRIME_CLASSES = { LynxModule.class, DcMotorEx.class, AnalogInput.class };
+    // We prime the wrappers for the following classes using the file worker thread. In addition
+    // to having these already in the cache, this act also primes Byte Buddy performance (the first
+    // call is always extremely slow due to so much code to JIT). Note that this list cannot include
+    // interfaces!
+    static final Class<?>[] PRIME_CLASSES = { LynxModule.class, AnalogInput.class };
 
     ProxyBuilder proxyBuilder; // Byte Buddy proxy builder
     LinkedBlockingQueue<Message> messageQueue = new LinkedBlockingQueue<>(); // Message queue
@@ -258,8 +257,8 @@ class FileWorker {
             descriptor += " (Match)";
 
         // Create the final filename in the form "123-RC 2024-11-25 [17.37pm] #1 [176s] TeleOp.sidekick":
-        String fileName = String.format(Locale.US, "%s %s #%d [%.0fs] %s.sidekick",
-            message.robotName, message.dateAndTime, message.lastRunNumber, runSeconds, descriptor);
+        String fileName = String.format(Locale.US, "%s #%d [%.0fs] %s.sidekick",
+            message.nameDateAndTime, message.lastRunNumber, runSeconds, descriptor);
 
         // Before potentially creating a new epoch capture, delete all old ones:
         deleteEpochCaptures();
@@ -336,19 +335,24 @@ class FileWorker {
             // Sort the files by modified time, oldest first:
             Arrays.sort(sidekickFiles, Comparator.comparingLong(File::lastModified));
 
-            // Delete any files older than the specified number of retention days. Note that this
-            // will delete all files that start with '1900-' which can be created when op modes
-            // are launched without a connected Driver Station to supply the robot with the current
-            // date and time. (This can happen with FTC Dashboard and probably also Panels.)
-            // Multiple files with '1900-' mess up our logic for downloading the newest capture
-            // anyway.
-            int retentionDays = Sidekick.instance.retentionDays;
-            long cutoffMillis = System.currentTimeMillis() - retentionDays * 24L * 60L * 60L * 1000L;
-            for (File f : sidekickFiles) {
-                long lastModified = f.lastModified();
-                if ((lastModified != 0) && (lastModified < cutoffMillis)) {
-                    Sidekick.logI("Deleting " + f.getName());
-                    f.delete();
+            // We only perform retention-based deletion if the current year is reasonable. The
+            // year will be 1969 or 1970 if the robot hasn't received the current date and time 
+            // from the Driver Station yet.
+            if (Calendar.getInstance().get(Calendar.YEAR) > 2000) {
+                // Delete any files older than the specified number of retention days. Note that this
+                // will delete all files that start with '1969-' which can be created when op modes
+                // are launched without a connected Driver Station to supply the robot with the current
+                // date and time. (This can happen with FTC Dashboard and probably also Panels.)
+                // Multiple files with '1969-' mess up our logic for downloading the newest capture
+                // anyway.
+                int retentionDays = Sidekick.instance.retentionDays;
+                long cutoffMillis = System.currentTimeMillis() - retentionDays * 24L * 60L * 60L * 1000L;
+                for (File f : sidekickFiles) {
+                    long lastModified = f.lastModified();
+                    if ((lastModified != 0) && (lastModified < cutoffMillis)) {
+                        Sidekick.logI("Deleting " + f.getName());
+                        f.delete();
+                    }
                 }
             }
 
