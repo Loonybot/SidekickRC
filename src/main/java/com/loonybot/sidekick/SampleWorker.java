@@ -407,7 +407,7 @@ class SampleWorker {
                     }
                 }
                 // End the capture if the opMode has passed the 120-second limit for TeleOp:
-                if ((capture.startNanoTime != capture.initNanoTime) &&
+                if ((capture.hasStarted()) &&
                         ((currentNanoTime - capture.startNanoTime) > Capture.OP_MODE_TIME_LIMIT_NANOS) &&
                         !(capture.isEnded)) {
                     capture.endCapture(Capture.LOGCAT_OP_MODE_TIME_LIMIT);

@@ -3,7 +3,6 @@
 /// Copyright James Goossen.
 package com.loonybot.sidekick;
 
-import static com.loonybot.sidekick.Sidekick.TEMP_LOGCAT_FILE;
 import static java.lang.System.nanoTime;
 
 import android.os.StatFs;
@@ -94,6 +93,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
@@ -224,6 +225,7 @@ class Signature {
 class ParamType {
     static final byte VOID = 'v'; // For return values only
     static final byte ARRAY_PREFIX = 'a'; // Prefix denoting an array; the array type immediately follows
+    static final byte LIST_PREFIX = 'l'; // Prefix denoting a list; the list type immediately follows
     static final byte BEGIN_OBJECT = '<'; // Begin bracket for a serialized object; the serializer index immediately follows
     static final byte END_OBJECT = '>'; // End bracket for serialized objects
     static final byte OBJECT_TO_STRING = 't'; // For unrecognized object types, use toString()
@@ -522,10 +524,10 @@ class Capture {
             }
 
             // Combine the argument and return types into a single array of parameter types:
-            Class<?>[] parameterTypes = method.getParameterTypes();
+            Type[] parameterTypes = method.getGenericParameterTypes();
             int parameterCount = parameterTypes.length;
-            Class<?>[] allParameters = Arrays.copyOf(parameterTypes, parameterCount + 1);
-            allParameters[parameterCount] = method.getReturnType();
+            Type[] allParameters = Arrays.copyOf(parameterTypes, parameterCount + 1);
+            allParameters[parameterCount] = method.getGenericReturnType();
 
             // Encode a representation of all the argument types:
             SchemaKey argsKey = getSchemaKey(allParameters, true, 0);
@@ -620,15 +622,15 @@ class Capture {
 
         /// This is another argument consumer similar to [Capture#putIntegerObject], et al., except
         /// that it comes bundled with additional state to handle the complexity of serializing an
-        /// array.
-        class ArrayPutter {
+        /// list or an array.
+        class ListArrayPutter {
             static final int MAX_ARRAY_SIZE = 250; // The count fits into an unsigned byte
 
             Consumer<Object> paramPutter; // 'putter' for the type of the array's elements
             int argSize; // The byte size of an element of the array
 
             // Take a 'putter' for the array's elements.
-            ArrayPutter(Consumer<Object> paramPutter, int argSize) {
+            ListArrayPutter(Consumer<Object> paramPutter, int argSize) {
                 this.paramPutter = paramPutter;
                 this.argSize = argSize;
             }
@@ -644,6 +646,20 @@ class Capture {
                         nextChunk();
                     }
                     paramPutter.accept(Array.get(array, i));
+                }
+            }
+
+            // Serialize a list by writing its size and then putting each element.
+            void putList(Object list) {
+                int count = Math.min(((List<?>) list).size(), MAX_ARRAY_SIZE);
+                chunk.put((byte) count); // This doesn't need to check chunkRemaining; already done
+                for (int i = 0; i < count; i++) {
+                    // To reduce fragmentation and also avoid the problem of count * argSize >
+                    // CHUNK_SIZE, we check the space on every loop:
+                    if ((chunkRemaining -= argSize) < 0) {
+                        nextChunk();
+                    }
+                    paramPutter.accept(((List<?>) list).get(i));
                 }
             }
         }
@@ -689,7 +705,8 @@ class Capture {
 
         /// Adds to [DynamicDescriptor#recordLength] on every invocation.
         Consumer<Object> nextParamPutter() {
-            switch (formatBuffer[formatIndex++]) {
+            byte paramType = formatBuffer[formatIndex++];
+            switch (paramType) {
                 case ParamType.INTEGER: recordLength += 4; return Capture.this::putIntegerObject;
                 case ParamType.FLOAT: recordLength += 4; return Capture.this::putFloatObject;
                 case ParamType.BOOLEAN: recordLength += 1; return Capture.this::putBooleanObject;
@@ -698,12 +715,19 @@ class Capture {
                 case ParamType.STRING: return Capture.this::putStringObject; // String does its own length check
                 case ParamType.STRING_NO_QUOTES: return Capture.this::putStringObject;
                 case ParamType.VOID: return Capture.this::putVoidObject;
+
+                case ParamType.LIST_PREFIX:
                 case ParamType.ARRAY_PREFIX:
                     int arrayStartLength = ++recordLength; // Reserve a byte for the array size
                     Consumer<Object> paramPutter = nextParamPutter(); // Increments recordLength
                     int argLength = recordLength - arrayStartLength;
                     recordLength = arrayStartLength;
-                    return new DynamicDescriptor.ArrayPutter(paramPutter, argLength)::putArray;
+                    if (paramType == ParamType.LIST_PREFIX) {
+                        return new ListArrayPutter(paramPutter, argLength)::putList;
+                    } else {
+                        return new ListArrayPutter(paramPutter, argLength)::putArray;
+                    }
+
                 case ParamType.BEGIN_OBJECT:
                     int serializerIndex = formatBuffer[formatIndex++];
                     Sidekick.SerializerInfo<?> serializerInfo = sidekick.serializersList.get(serializerIndex);
@@ -827,7 +851,7 @@ class Capture {
     HashMap<String, Integer> stringTokensMap = new HashMap<>(); // Static string map
     LinkedList<String> stringTokensList = new LinkedList<>(); // Static string list
     int uniquenessCounter = 0; /// Used by [Capture#generateUniqueness()]
-    final Map<Class<?>, SchemaKey> classParamTypes = new HashMap<>(); // Stash of param types for varargs
+    final Map<Type, SchemaKey> classParamTypes = new HashMap<>(); // Stash of type to param type mappings
     byte[][] lastLynxBulkPayload = new byte[MAX_LYNX_COUNT][BULK_DATA_BYTE_COUNT]; // Last recorded bulk payload
     boolean pinpointSetBulkReadScope = false; /// True if [GoBildaPinpointDriver#setBulkReadScope] has been called
     CountDownLatch fileDoneLatch = new CountDownLatch(1); // Signals when the file is done being written
@@ -836,6 +860,11 @@ class Capture {
     LimelightVideo limelightCapture; // Video capture for the Limelight camera, null if not started
     int nextStopwatchId; // ID of the next stopwatch object to be created
     NoMovement noMovement = new NoMovement(); // State for tracking beginNoMovement/endNoMovement APIs
+
+    /// Returns true if the Start button has been pressed.
+    boolean hasStarted() {
+        return startNanoTime != initNanoTime;
+    }
 
     /// Generate a unique ID for a record. Guaranteed to be non-zero even if truncated to 16 bits.
     int generateUniqueness() {
@@ -983,48 +1012,58 @@ class Capture {
         }
     }
 
-    /// Returns the [ParamType] serialization format for the given class.
-    static byte getParamType(Class<?> klass) {
-        String name = klass.getName();
-        switch (name) {
-            // Method parameters (generally) have unboxed types, but parameters returned from
-            // serializers are always boxed, and a new device API might have boxed arguments.
-            case "void":
-            case "java.lang.Void":
-                return ParamType.VOID;
-            case "double":
-            case "float":
-            case "java.lang.Double":
-            case "java.lang.Float":
-                return ParamType.FLOAT;
-            case "int":
-            case "long":
-            case "short":
-            case "byte":
-            case "char":
-            case "java.lang.Integer":
-            case "java.lang.Long":
-            case "java.lang.Short":
-            case "java.lang.Byte":
-            case "java.lang.Char":
-                return ParamType.INTEGER;
-            case "boolean":
-            case "java.lang.Boolean":
-                return ParamType.BOOLEAN;
-            case "java.lang.String":
-                return ParamType.STRING;
-            default:
-                if (klass.isEnum()) {
-                    return ParamType.ENUM;
-                } else if (klass.isArray()) {
-                    return ParamType.ARRAY_PREFIX;
-                } else if (Sidekick.instance.serializersMap.get(klass) != null) {
-                    return ParamType.BEGIN_OBJECT;
-                } else {
-                    // Our catch-all is to convert the parameter to a String using 'toString()'.
-                    return ParamType.OBJECT_TO_STRING;
+    /// Returns the [ParamType] serialization format for the given type.
+    static byte getParamType(Type type) {
+        if (type instanceof ParameterizedType) {
+            ParameterizedType parameterizedType = (ParameterizedType) type;
+            if (parameterizedType.getRawType() instanceof Class<?>) {
+                Class<?> klass = (Class<?>) parameterizedType.getRawType();
+                if (List.class.isAssignableFrom(klass)) {
+                    return ParamType.LIST_PREFIX;
                 }
+            }
+        } else if (type instanceof Class<?>) {
+            Class<?> klass = (Class<?>) type;
+            String name = klass.getName();
+            switch (name) {
+                // Method parameters (generally) have unboxed types, but parameters returned from
+                // serializers are always boxed, and a new device API might have boxed arguments.
+                case "void":
+                case "java.lang.Void":
+                    return ParamType.VOID;
+                case "double":
+                case "float":
+                case "java.lang.Double":
+                case "java.lang.Float":
+                    return ParamType.FLOAT;
+                case "int":
+                case "long":
+                case "short":
+                case "byte":
+                case "char":
+                case "java.lang.Integer":
+                case "java.lang.Long":
+                case "java.lang.Short":
+                case "java.lang.Byte":
+                case "java.lang.Char":
+                    return ParamType.INTEGER;
+                case "boolean":
+                case "java.lang.Boolean":
+                    return ParamType.BOOLEAN;
+                case "java.lang.String":
+                    return ParamType.STRING;
+                default:
+                    if (klass.isEnum()) {
+                        return ParamType.ENUM;
+                    } else if (klass.isArray()) {
+                        return ParamType.ARRAY_PREFIX;
+                    } else if (Sidekick.instance.serializersMap.get(klass) != null) {
+                        return ParamType.BEGIN_OBJECT;
+                    }
+            }
         }
+        // Our catch-all is to convert the parameter to a String using 'toString()'.
+        return ParamType.OBJECT_TO_STRING;
     }
 
      /// This is a record wrapper for the varargs format byte array so that it can be used as a key
@@ -1058,10 +1097,10 @@ class Capture {
 
     /// Efficiently return the serialization formats for each of the given arguments. When
     /// encoding varargs, the provided args array will be the actual varargs array of objects,
-    /// and `argsAreClasses` will be false. When encoding methods, the args array will be the
-    /// [Method#getParameterTypes] array of Class<?> for each argument of the method, and
-    /// `argsAreClasses` will be true.
-    @NonNull SchemaKey getSchemaKey(Object[] args, boolean argsAreClasses, int recursionLevel) {
+    /// and `argsAreTypes` will be false. When encoding methods, the args array will be the
+    /// [Method#getGenericParameterTypes] array of [Type] for each argument of the method, and
+    /// `argsAreTypes` will be true.
+    @NonNull SchemaKey getSchemaKey(Object[] args, boolean argsAreTypes, int recursionLevel) {
         int argCount = args.length;
         byte[] resultBuffer = new byte[argCount]; // Size array assuming no objects, for now
         int resultIndex = 0;
@@ -1070,32 +1109,41 @@ class Capture {
             if (arg == null) {
                 schemaKey = new SchemaKey(new byte[]{ParamType.VOID});
             } else {
-                Class<?> klass = (argsAreClasses) ? (Class<?>) arg : arg.getClass();
-                schemaKey = classParamTypes.get(klass); // Look for this argument's class in the map
+                Type type = (argsAreTypes) ? (Type) arg : arg.getClass();
+                schemaKey = classParamTypes.get(type); // Look for this argument's class in the map
                 if (schemaKey == null) {
                     // Couldn't find precomputed param types for this class, so compute them
                     // now and cache the result for next time:
-                    byte paramType = getParamType(klass);
-                    if (paramType == ParamType.ARRAY_PREFIX) {
-                        // Get the schema key for the type of the array's elements:
-                        SchemaKey arrayKey = getSchemaKey(new Class[]{klass.getComponentType()}, true, recursionLevel);
+                    byte paramType = getParamType(type);
+                    if ((paramType == ParamType.LIST_PREFIX) || (paramType == ParamType.ARRAY_PREFIX)) {
+                        Class<?> elementClass;
+                        if (paramType == ParamType.LIST_PREFIX) {
+                            assert (type instanceof ParameterizedType);
+                            Type[] typeArgs = ((ParameterizedType) type).getActualTypeArguments();
+                            elementClass = (Class<?>) typeArgs[0];
+                        } else {
+                            // Get the schema key for the type of the array's elements:
+                            elementClass = ((Class<?>) type).getComponentType();
+                        }
+                        SchemaKey listKey = getSchemaKey(new Class[]{elementClass}, true, recursionLevel);
 
-                        // Prepend ARRAY_PREFIX to the schema; that's the key for this argument.
-                        byte[] arrayKeyBuffer = new byte[arrayKey.format.length + 1];
-                        arrayKeyBuffer[0] = ParamType.ARRAY_PREFIX;
-                        System.arraycopy(arrayKey.format, 0, arrayKeyBuffer, 1, arrayKey.format.length);
+                        // Prepend paramType to the schema; that's the key for this argument.
+                        byte[] arrayKeyBuffer = new byte[listKey.format.length + 1];
+                        arrayKeyBuffer[0] = paramType;
+                        System.arraycopy(listKey.format, 0, arrayKeyBuffer, 1, listKey.format.length);
                         schemaKey = new SchemaKey(arrayKeyBuffer);
 
                     } else if (paramType == ParamType.BEGIN_OBJECT) {
                         // Get the schema key for the object:
-                        Sidekick.SerializerInfo<?> serializerInfo = sidekick.serializersMap.get(klass);
+                        Class<?> objectClass = (Class<?>) type;
+                        Sidekick.SerializerInfo<?> serializerInfo = sidekick.serializersMap.get(objectClass);
                         assert (serializerInfo != null);
                         SchemaKey objectKey = getSchemaKey(serializerInfo.prototypeOutput, false, recursionLevel + 1);
 
                         // Bracket the schema with BEGIN/END_OBJECT; that's the key for this argument:
                         byte[] objectFormatBuffer = new byte[objectKey.format.length + 3];
                         objectFormatBuffer[0] = ParamType.BEGIN_OBJECT;
-                        objectFormatBuffer[1] = (byte) serializerInfo.identifier; // @@@ Cap serializer count
+                        objectFormatBuffer[1] = (byte) serializerInfo.identifier;
                         System.arraycopy(objectKey.format, 0, objectFormatBuffer, 2, objectKey.format.length);
                         objectFormatBuffer[objectFormatBuffer.length - 1] = ParamType.END_OBJECT;
                         schemaKey = new SchemaKey(objectFormatBuffer);
@@ -1106,7 +1154,7 @@ class Capture {
                     }
 
                     // Cache the result in the map for next time:
-                    classParamTypes.put(klass, schemaKey);
+                    classParamTypes.put(type, schemaKey);
                 }
             }
             // Special case the typical, simple case:
@@ -1114,8 +1162,8 @@ class Capture {
                 resultBuffer[resultIndex] = schemaKey.format[0];
                 resultIndex++;
             } else {
-                // Don't allow objects beyond the first level; use toString() at lower levels:
-                if ((schemaKey.format[0] == ParamType.BEGIN_OBJECT) && (recursionLevel > 0)) {
+                // Beyond a fixed number of recursions, switch from objects to using toString():
+                if ((schemaKey.format[0] == ParamType.BEGIN_OBJECT) && (recursionLevel > 2)) {
                     schemaKey = new SchemaKey(new byte[]{ParamType.STRING});
                 }
                 // Resize the results array, remembering that we expected this to take one byte:
@@ -1129,6 +1177,11 @@ class Capture {
         return new SchemaKey(resultBuffer);
     }
 
+    /// Start a Limelight video capture.
+    void startLimelightCapture() {
+        limelightCapture = new LimelightVideo(Sidekick.SUBDIRECTORY + "/" + nameDateAndTime + ".lvc", limelightAddress);
+    }
+
     /// Remember the time of the 'Start' button. We get notified by the event loop listener.
     void markStartTime() {
         startNanoTime = nanoTime();
@@ -1140,10 +1193,10 @@ class Capture {
 
         // Start Limelight video capture if a Limelight was registered during Init:
         if (limelightAddress != null) {
-            Sidekick.logI("Starting Limelight capture");
-            limelightCapture = new LimelightVideo(videoRootName + ".lvc", limelightAddress);
+            Sidekick.logI("Starting Limelight capture at start");
+            startLimelightCapture();
         } else {
-            Sidekick.logI("No Limelight found");
+            Sidekick.logI("No Limelight found at start");
         }
 
         // Ask a connected PC to potentially start a screen capture via ADB:
@@ -1857,7 +1910,7 @@ class Capture {
         cmd.append("logcat ");
         cmd.append("-v usec ");
         cmd.append("UsbRequestJNI:S UsbRequest:S art:W ThreadPool:W System:W ");
-        cmd.append("-f ").append(TEMP_LOGCAT_FILE).append(" ");
+        cmd.append("-f ").append(Sidekick.TEMP_LOGCAT_FILE).append(" ");
         cmd.append("-d "); // Dump and exit
 
         if (lastLogcatTime != null) {
@@ -1874,7 +1927,7 @@ class Capture {
         } catch (IOException | InterruptedException ignored) {}
 
         // Now serialize the resulting text file:
-        File tempLogcatFile = new File(TEMP_LOGCAT_FILE);
+        File tempLogcatFile = new File(Sidekick.TEMP_LOGCAT_FILE);
         if (!tempLogcatFile.exists()) {
             minorError("Logcat file not found");
         } else {
@@ -3160,8 +3213,15 @@ class Capture {
                             originalObject, "inetAddress", InetAddress.class);
                     if (inetAddress != null) {
                         capture.limelightAddress = inetAddress.getHostAddress();
+                        // Normally we start a Limelight capture when the Start button is pressed
+                        // but sometimes during practice it gets pressed before device initialization
+                        // actually completes. If so, start it now:
+                        if (hasStarted()) {
+                            Sidekick.logI("Starting delayed Limelight capture");
+                            startLimelightCapture();
+                        }
                     } else {
-                        minorError("Limelight IP address");
+                        minorError("Couldn't acquire Limelight IP address");
                     }
                     originalLimelight = (Limelight3A) originalObject;
                 }

@@ -11,6 +11,9 @@ import androidx.annotation.NonNull;
 
 import com.google.gson.Gson;
 import com.qualcomm.ftccommon.FtcEventLoop;
+import com.qualcomm.hardware.limelightvision.LLResult;
+import com.qualcomm.hardware.limelightvision.LLResultTypes;
+import com.qualcomm.hardware.limelightvision.LLStatus;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.OpMode;
 import com.qualcomm.robotcore.eventloop.opmode.OpModeManager;
@@ -25,15 +28,21 @@ import org.firstinspires.ftc.robotcore.external.Telemetry;
 import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
+import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
+import org.firstinspires.ftc.robotcore.external.navigation.Position;
+import org.firstinspires.ftc.robotcore.external.navigation.Quaternion;
 import org.firstinspires.ftc.robotcore.external.navigation.YawPitchRollAngles;
 import org.firstinspires.ftc.robotcore.internal.opmode.OpModeMeta;
+import org.json.JSONObject;
 import org.objenesis.Objenesis;
 import org.objenesis.ObjenesisStd;
 
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IllegalFormatException;
@@ -152,6 +161,19 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     }
     static void logI(String format, Object... args) { // Info
         Log.i(TAG, safeFormat(format, args));
+    }
+
+    /// Reflection helper to instantiate a class that has a protected or private constructor
+    /// for the specified argument.
+    public static <T> T instantiateObject(Class<T> klass, Class<?> argType, Object arg) {
+        try {
+            Constructor<T> constructor = klass.getDeclaredConstructor(argType);
+            constructor.setAccessible(true);
+            return constructor.newInstance(arg);
+        } catch (NoSuchMethodException | InvocationTargetException | InstantiationException | IllegalAccessException e) {
+            Sidekick.logE("Failed to instantiate object of class %s", klass.getName());
+            return null;
+        } 
     }
 
     /// Reflection helper to get a field value; works on fields of superclasses. Null on failure.
@@ -448,21 +470,198 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     void oneTimeOpModeInitialization() {
         // Register default serializers:
         registerSerializer(
-                new Pose2D(DistanceUnit.INCH, 0, 0, AngleUnit.RADIANS, 0),
-                "x=in, y=in, heading=rad",
+                // Record canonically in inches and degrees; app will convert to preferred units:
+                new Pose2D(DistanceUnit.INCH, 0, 0, AngleUnit.DEGREES, 0),
+                "x=in, y=in, heading=deg",
                 x -> new Double[] {
                         x.getX(DistanceUnit.INCH),
                         x.getY(DistanceUnit.INCH),
-                        x.getHeading(AngleUnit.RADIANS)
+                        x.getHeading(AngleUnit.DEGREES)
                 });
         registerSerializer(
-                new YawPitchRollAngles(AngleUnit.RADIANS, 0, 0, 0, 0),
-                "yaw=rad, pitch=rad, roll=rad",
-                x -> new Double[]{
-                        x.getYaw(AngleUnit.RADIANS),
-                        x.getPitch(AngleUnit.RADIANS),
-                        x.getRoll(AngleUnit.RADIANS)
+                // Record canonically in inches and degrees; app will convert to preferred units:
+                new Position(DistanceUnit.INCH, 0, 0, 0, 0),
+                "x=in, y=in, z=in",
+                x -> new Double[] {
+                        DistanceUnit.INCH.fromUnit(x.unit, x.x),
+                        DistanceUnit.INCH.fromUnit(x.unit, x.y),
+                        DistanceUnit.INCH.fromUnit(x.unit, x.z),
                 });
+        registerSerializer(
+                // Record canonically in degrees and degrees; app will convert to preferred units:
+                new YawPitchRollAngles(AngleUnit.DEGREES, 0, 0, 0, 0),
+                "yaw=deg, pitch=deg, roll=deg",
+                x -> new Double[] {
+                        x.getYaw(AngleUnit.DEGREES),
+                        x.getPitch(AngleUnit.DEGREES),
+                        x.getRoll(AngleUnit.DEGREES)
+                });
+        registerSerializer(
+                new Pose3D(new Position(DistanceUnit.INCH, 0, 0, 0, 0),
+                        new YawPitchRollAngles(AngleUnit.DEGREES, 0, 0, 0, 0)),
+                "position=, orientation=",
+                x -> new Object[] {
+                        x.getPosition(),
+                        x.getOrientation()
+                });
+        registerSerializer(
+                Quaternion.identityQuaternion(),
+                "w=, x=, y=, z=",
+                x -> new Float[] {
+                        x.w, x.x, x.y, x.z
+                });
+
+        JSONObject emptyJson = new JSONObject();
+        LLStatus llStatus = instantiateObject(LLStatus.class, JSONObject.class, emptyJson);
+        if (llStatus != null) {
+            registerSerializer(
+                    llStatus,
+                    "name=, cpu=%, fps=, ram=%, temp=C, pipelineType=",
+                    x -> new Object[] {
+                            x.getName(),
+                            x.getCpu(),
+                            x.getFps(),
+                            x.getRam(),
+                            x.getTemp(),
+                            x.getPipelineType(),
+                    });
+        }
+        LLResult llResult = instantiateObject(LLResult.class, JSONObject.class, emptyJson);
+        if (llResult != null) {
+            registerSerializer(
+                    llResult,
+                    "valid=, staleness=ms, parseLatency=ms, tx=deg, ty=deg, txnc=deg, tync=deg, " +
+                            "ta=%, focusMetric=, botpose=, botpose_MT2=, stddevMt1=, stddevMt2=, " +
+                            "botposeTagCount=, botposeSpan=m, botposeAvgDist=m, botposeAvgArea=, " +
+                            "captureLatency=ms, targetingLatency=ms, timestamp=, pythonOutput=, " +
+                            "barcodeResults.size()=, classifierResults.size()=, " +
+                            "detectorResults.size()=, fiducialResults.size()=, colorResults.size()=",
+                    // We serialize only the sizes of the lists here because Sidekick doesn't deal
+                    // well with encoding arrays within an object.
+                    x -> new Object[] {
+                            x.isValid(),
+                            x.getStaleness(),
+                            x.getParseLatency(),
+                            x.getTx(),
+                            x.getTy(),
+                            x.getTxNC(),
+                            x.getTyNC(),
+                            x.getTa(),
+                            x.getFocusMetric(),
+                            x.getBotpose(),
+                            x.getBotpose_MT2(),
+                            x.getStddevMt1(),
+                            x.getStddevMt2(),
+                            x.getBotposeTagCount(),
+                            x.getBotposeSpan(),
+                            x.getBotposeAvgDist(),
+                            x.getBotposeAvgArea(),
+                            x.getCaptureLatency(),
+                            x.getTargetingLatency(),
+                            x.getTimestamp(),
+                            x.getPythonOutput(),
+                            x.getBarcodeResults().size(),
+                            x.getClassifierResults().size(),
+                            x.getDetectorResults().size(),
+                            x.getFiducialResults().size(),
+                            x.getColorResults().size()
+                    });
+            }
+        LLResultTypes.FiducialResult fiducial = instantiateObject(
+                LLResultTypes.FiducialResult.class, JSONObject.class, emptyJson);
+        if (fiducial != null) {
+            registerSerializer(
+                    fiducial,
+                    "fiducialId=, family=, skew=, cameraPoseTargetSpace=, " +
+                            "robotPoseFieldSpace=, robotPoseTargetSpace=, targetPoseCameraSpace=, " +
+                            "targetPoseRobotSpace=, ta=%, txp=pixels, typ=pixels, tx=deg, ty=deg, " +
+                            "tx_nocross=deg, ty_nocross=deg",
+                    x -> new Object[]{
+                            x.getFiducialId(),
+                            x.getFamily(),
+                            x.getSkew(),
+                            x.getCameraPoseTargetSpace(),
+                            x.getRobotPoseFieldSpace(),
+                            x.getRobotPoseTargetSpace(),
+                            x.getTargetPoseCameraSpace(),
+                            x.getTargetPoseRobotSpace(),
+                            x.getTargetArea(),
+                            x.getTargetXPixels(),
+                            x.getTargetYPixels(),
+                            x.getTargetXDegrees(),
+                            x.getTargetYDegrees(),
+                            x.getTargetXDegreesNoCrosshair(),
+                            x.getTargetYDegreesNoCrosshair()
+                    });
+        }
+        LLResultTypes.BarcodeResult barcode = instantiateObject(
+                LLResultTypes.BarcodeResult.class, JSONObject.class, emptyJson);
+        if (barcode != null) {
+            registerSerializer(
+                    barcode,
+                    "family=, data=, txp=pixels, typ=pixels, tx=deg, ty=deg, " +
+                            "tx_nocross=, ty_nocross=, ta=",
+                    x -> new Object[]{
+                            x.getFamily(),
+                            x.getData(),
+                            x.getTargetXPixels(),
+                            x.getTargetYPixels(),
+                            x.getTargetXDegrees(),
+                            x.getTargetYDegrees(),
+                            x.getTargetXDegreesNoCrosshair(),
+                            x.getTargetYDegreesNoCrosshair(),
+                            x.getTargetArea()
+                    });
+        }
+        LLResultTypes.ClassifierResult classifier = instantiateObject(
+                LLResultTypes.ClassifierResult.class, JSONObject.class, emptyJson);
+        if (classifier != null) {
+            registerSerializer(
+                    classifier,
+                    "className=, classId=, confidence=",
+                    x -> new Object[]{
+                            x.getClassName(),
+                            x.getClassId(),
+                            x.getConfidence(),
+                    });
+        }
+        LLResultTypes.DetectorResult detector = instantiateObject(
+                LLResultTypes.DetectorResult.class, JSONObject.class, emptyJson);
+        if (detector != null) {
+            registerSerializer(
+                    detector,
+                    "className=, classId=, confidence=, ta=%, txp=pixels, typ=pixels, " +
+                    "tx=deg, ty=deg, tx_nocross=deg, ty_nocross=deg",
+                    x -> new Object[]{
+                            x.getClassName(),
+                            x.getClassId(),
+                            x.getConfidence(),
+                            x.getTargetArea(),
+                            x.getTargetXPixels(),
+                            x.getTargetYPixels(),
+                            x.getTargetXDegrees(),
+                            x.getTargetYDegrees(),
+                            x.getTargetXDegreesNoCrosshair(),
+                            x.getTargetYDegreesNoCrosshair()
+                    });
+        }
+        LLResultTypes.ColorResult color = instantiateObject(
+                LLResultTypes.ColorResult.class, JSONObject.class, emptyJson);
+        if (color != null) {
+            registerSerializer(
+                    color,
+                    "ta=%, txp=pixels, typ=pixels, " +
+                            "tx=deg, ty=deg, tx_nocross=deg, ty_nocross=deg",
+                    x -> new Object[]{
+                            x.getTargetArea(),
+                            x.getTargetXPixels(),
+                            x.getTargetYPixels(),
+                            x.getTargetXDegrees(),
+                            x.getTargetYDegrees(),
+                            x.getTargetXDegreesNoCrosshair(),
+                            x.getTargetYDegreesNoCrosshair()
+                    });
+        }
     }
 
     /// Callback courtesy of [OpModeManagerNotifier.Notifications]: the user likely just pressed

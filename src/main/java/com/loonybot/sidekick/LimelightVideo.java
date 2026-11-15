@@ -84,7 +84,7 @@ class LimelightVideo {
         ArrayList<long[]> index = new ArrayList<>();
         long captureStartNanoTime;
 
-        Sidekick.logI("+++ Limelight video capture started");
+        Sidekick.logI("+++ Limelight video capture started: '%s'", filename);
 
         try {
             file = new RandomAccessFile(filename, "rw");
