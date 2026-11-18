@@ -32,10 +32,10 @@ class PaintId {
 }
 
 /**
- * Canvas class for visualizations in Sidekick. Thanks to FTC Dashboard for the model.
+ * Graphics class for visualizations in Sidekick. Thanks to FTC Dashboard for the model.
  */
 @SuppressWarnings({"unused", "UnusedReturnValue"})
-public class Canvas implements AutoCloseable {
+public class Graphics {
     /// Helper class for converting FTC Dashboard CanvasOps.
     class DashboardCanvasOp {
         Object op; // Instance of a class that extends com.acmerobotics.dashboard.canvas.CanvasOp
@@ -81,12 +81,12 @@ public class Canvas implements AutoCloseable {
     int bufferRemaining = BUFFER_SIZE; // Amount of buffer space remaining, negative if ran out
     String brushColor; // Currently set brush color
     String penColor; // Currently set pen color
-    boolean submitted = false; // True if the canvas has been submitted to the capture
+    boolean submitted = false; // True if submitted to the capture
 
-    /// Package private constructor. Call [Sk#createCanvas()] instead to create a new canvas.
-    Canvas() {}
+    /// Package private constructor. Call [Sk#createGraphics()] instead to create the object.
+    Graphics() {}
 
-    /// This package private constructor converts a Road Runner canvas to a Sidekick canvas object.
+    /// This package private constructor converts a Road Runner canvas to a Sidekick graphics object.
     /// We do **everything** with reflection:
     /// - Most of the FTC Dashboard canvas fields we need to access are marked `private`, and we
     ///   can work around that with reflection.
@@ -95,7 +95,7 @@ public class Canvas implements AutoCloseable {
     ///
     /// See [[FTC Dashboard's Field.js](https://github.com/acmerobotics/ftc-dashboard/blob/master/client/src/components/views/FieldView/Field.js)]
     /// for reference.
-    Canvas(Object dashboardCanvas) {
+    Graphics(Object dashboardCanvas) {
         if ((dashboardCanvas == null) || (!dashboardCanvas.getClass().getName().equals("com.acmerobotics.dashboard.canvas.Canvas"))) {
             throw new IllegalArgumentException("Sidekick: Must be a com.acmerobotics.dashboard.canvas Canvas object.");
         }
@@ -209,10 +209,10 @@ public class Canvas implements AutoCloseable {
         }
     }
 
-    /// Throws if the canvas has already been submitted.
+    /// Throws if the graphics has already been submitted.
     void ensureOpen() {
         if (submitted) {
-            throw new IllegalStateException("Canvas has already been submitted");
+            throw new IllegalStateException("Graphics has already been submitted");
         }
     }
 
@@ -232,12 +232,12 @@ public class Canvas implements AutoCloseable {
     }
 
     /// drawText() is not supported yet.
-    private Canvas drawText(PointD position, String text) {
+    private Graphics drawText(PointD position, String text) {
         return drawText(position, text, 0, false, false, "");
     }
 
     /// drawText() is not supported yet.
-    private Canvas drawText(PointD position, String text, double theta, boolean stroke, boolean usePageFrame, String font) {
+    private Graphics drawText(PointD position, String text, double theta, boolean stroke, boolean usePageFrame, String font) {
         ensureOpen();
         byte[] stringEncoding = text.getBytes(UTF8);
         byte[] fontEncoding = font.getBytes(UTF8);
@@ -264,9 +264,9 @@ public class Canvas implements AutoCloseable {
      * Set the brush color.
      *
      * @param color Can be null or a string like "#ffbc00".
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas setBrush(String color) {
+    public Graphics setBrush(String color) {
         ensureOpen();
         if (!Objects.equals(color, brushColor)) {
             brushColor = color;
@@ -279,9 +279,9 @@ public class Canvas implements AutoCloseable {
      * Set the pen color.
      *
      * @param color Can be null or a string like "#ffbc00".
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas setPen(String color) {
+    public Graphics setPen(String color) {
         ensureOpen();
         if (!Objects.equals(color, penColor)) {
             penColor = color;
@@ -295,9 +295,9 @@ public class Canvas implements AutoCloseable {
      *
      * @param sx x-factor scale.
      * @param sy y-factor scale.
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas scale(double sx, double sy) {
+    public Graphics scale(double sx, double sy) {
         ensureOpen();
         if ((bufferRemaining -= 9) >= 0) {
             buffer.put(PaintId.SCALE);
@@ -311,9 +311,9 @@ public class Canvas implements AutoCloseable {
      * Rotate the current transform. Replaces any previously set rotation.
      *
      * @param angleInDegrees Angle in degrees.
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas rotate(double angleInDegrees) {
+    public Graphics rotate(double angleInDegrees) {
         ensureOpen();
         if ((bufferRemaining -= 5) >= 0) {
             buffer.put(PaintId.ROTATE);
@@ -326,9 +326,9 @@ public class Canvas implements AutoCloseable {
      * Set the offset for the current transform. Replaces any previously set translation.
      *
      * @param offset Offset.
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas translate(PointD offset) {
+    public Graphics translate(PointD offset) {
         ensureOpen();
         if ((bufferRemaining -= 9) >= 0) {
             buffer.put(PaintId.TRANSLATE);
@@ -344,9 +344,9 @@ public class Canvas implements AutoCloseable {
      * @param center Center of the ellipse in world space.
      * @param rx Radius in x-direction.
      * @param ry Radius in y-direction.
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas drawEllipse(PointD center, double rx, double ry) {
+    public Graphics drawEllipse(PointD center, double rx, double ry) {
         ensureOpen();
         if ((bufferRemaining -= 17) >= 0) {
             buffer.put(PaintId.DRAW_ELLIPSE);
@@ -362,9 +362,9 @@ public class Canvas implements AutoCloseable {
      * Draw a polygon.
      *
      * @param points Array of points in world space.
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas drawPolygon(PointD[] points) {
+    public Graphics drawPolygon(PointD[] points) {
         ensureOpen();
         if ((bufferRemaining -= (3 + 8*points.length)) >= 0) {
             if (points.length < Short.MAX_VALUE / 10) {
@@ -383,9 +383,9 @@ public class Canvas implements AutoCloseable {
      * Draw a connected list of lines.
      *
      * @param points Array of points in world space.
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas drawPolyline(PointD[] points) {
+    public Graphics drawPolyline(PointD[] points) {
         ensureOpen();
         if ((bufferRemaining -= (3 + 8*points.length)) >= 0) {
             if (points.length < Short.MAX_VALUE / 10) {
@@ -407,9 +407,9 @@ public class Canvas implements AutoCloseable {
      * @param y1 Start of line in world space.
      * @param x2 End of line in world space.
      * @param y2 End of line in world space.
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas drawLine(double x1, double y1, double x2, double y2) {
+    public Graphics drawLine(double x1, double y1, double x2, double y2) {
         ensureOpen();
         if ((bufferRemaining -= 17) >= 0) {
             buffer.put(PaintId.DRAW_LINE);
@@ -428,9 +428,9 @@ public class Canvas implements AutoCloseable {
      * @param y Y coordinate of the corner, in world space.
      * @param width Width of the rectangle, in world space.
      * @param height Height of the rectangle, in world space.
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas drawRect(double x, double y, double width, double height) {
+    public Graphics drawRect(double x, double y, double width, double height) {
         ensureOpen();
         if ((bufferRemaining -= 17) >= 0) {
             buffer.put(PaintId.DRAW_RECT);
@@ -446,9 +446,9 @@ public class Canvas implements AutoCloseable {
      * Set the pen width.
      *
      * @param width Width of the pen, in world space pixels.
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas setPenWidth(double width) {
+    public Graphics setPenWidth(double width) {
         ensureOpen();
         if ((bufferRemaining -= 5) >= 0) {
             buffer.put(PaintId.SET_PEN_WIDTH);
@@ -461,9 +461,9 @@ public class Canvas implements AutoCloseable {
      * Set the opacity.
      *
      * @param opacity Opacity, from 0.0 (fully transparent) to 1.0 (opaque).
-     * @return This canvas for chained calls.
+     * @return This graphics object for chained calls.
      */
-    public Canvas setOpacity(double opacity) {
+    public Graphics setOpacity(double opacity) {
         ensureOpen();
         if ((bufferRemaining -= 5) >= 0) {
             buffer.put(PaintId.SET_OPACITY);
@@ -473,20 +473,11 @@ public class Canvas implements AutoCloseable {
     }
 
     /**
-     * Auto-closable close() method.
-     */
-    @Override
-    public void close() {
-        if (!submitted) {
-            submit();
-        }
-    }
-
-    /**
-     * Submit the accumulated canvas commands to be recorded into the capture.
+     * Submit the accumulated graphics commands to be recorded into the capture.
       */
     public void submit() {
-        ensureOpen();
+        if (submitted)
+            return;
         if (Capture.instance != null) {
             Capture.instance.recordCanvas(this);
         }

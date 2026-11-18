@@ -225,9 +225,9 @@ public class Sk {
     }
 
     /**
-     * Create a native Sidekick Canvas object for adding visualizations to the Sidekick field view.
-     * Use the {@link Canvas} APIs to record drawing commands to the canvas and then call
-     * {@link Canvas#submit()} to record the result in the Sidekick capture. The drawing will be
+     * Create a Sidekick object for adding visualizations to the Sidekick field view.
+     * Use the {@link Graphics} APIs to record drawing commands with the object and then call
+     * {@link Graphics#submit()} to record the result in the Sidekick capture. The drawing will be
      * shown in the Sidekick application's field view; it will be shown until it's replaced by
      * a new submit.<br>
      * <br>
@@ -237,20 +237,20 @@ public class Sk {
      * coordinate values range from -72 to 72 inches. For the Pedro Pathing coordinate space,
      * the origin is in the bottom-left and coordinate values range from 0 to 144 inches.<br>
      * <br>
-     * The {@link Canvas#translate}, {@link Canvas#rotate} and {@link Canvas#scale} APIs can be
+     * The {@link Graphics#translate}, {@link Graphics#rotate} and {@link Graphics#scale} APIs can be
      * used to modify the coordinate space but the transforms are not cumulative;
-     * a second call to {@link Canvas#scale} will replace the first call rather than appending,
+     * a second call to {@link Graphics#scale} will replace the first call rather than appending,
      * for example.
      *
-     * @return The resulting Canvas object.
+     * @return The resulting Graphics object.
      */
-    public static Canvas createCanvas() {
-        return new Canvas();
+    public static Graphics createGraphics() {
+        return new Graphics();
     }
 
     /**
      * Record an FTC Dashboard Canvas object in the archive. The FTC Dashboard Canvas object gets
-     * automatically converted to a native Sidekick Canvas and then recorded.
+     * automatically converted to a native Sidekick Graphics object and then recorded.
      *
      * @param dashboardCanvas The FTC Dashboard Canvas object to be recorded; it must have been
      *                        created by FTC Dashboard and be of type com.acmerobotics.dashboard.canvas.

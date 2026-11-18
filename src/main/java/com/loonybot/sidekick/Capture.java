@@ -2255,10 +2255,10 @@ class Capture {
 
     /// Add the contents of an FTC Dashboard canvas to the capture.
     void captureDashboardCanvas(Object dashboardCanvas) {
-        recordCanvas(new Canvas(dashboardCanvas), CanvasFlags.ROTATED_FIELD);
+        recordCanvas(new Graphics(dashboardCanvas), CanvasFlags.ROTATED_FIELD);
     }
     void captureInferredDashboardCanvas(Object dashboardCanvas) {
-        recordCanvas(new Canvas(dashboardCanvas), CanvasFlags.ROTATED_FIELD | CanvasFlags.INFERRED);
+        recordCanvas(new Graphics(dashboardCanvas), CanvasFlags.ROTATED_FIELD | CanvasFlags.INFERRED);
     }
 
     /// Add data from a gamepad input packet to the capture.
@@ -2332,17 +2332,17 @@ class Capture {
         }
     }
 
-    /// Add the contents of a [Canvas] object to the capture.
-    void recordCanvas(Canvas canvas) { recordCanvas(canvas, 0); }
-    void recordCanvas(Canvas canvas, int flags) {
+    /// Add the contents of a [Graphics] object to the capture.
+    void recordCanvas(Graphics graphics) { recordCanvas(graphics, 0); }
+    void recordCanvas(Graphics graphics, int flags) {
         synchronized (sidekickLock) {
             if (beginRecord(RecordId.CANVAS, 3)) {
-                ByteBuffer buffer = canvas.buffer;
+                ByteBuffer buffer = graphics.buffer;
                 int size = buffer.position();
 
                 chunk.put((byte) flags);
                 chunk.putShort((short) size);
-                putBytes(canvas.buffer.array(), size);
+                putBytes(graphics.buffer.array(), size);
                 assertChunk();
             }
         }

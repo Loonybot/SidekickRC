@@ -238,7 +238,7 @@ class PeriodTracker {
     }
 }
 
-/// Sample FTC Dashboard for Canvases.
+/// Sample FTC Dashboard canvases.
 class DashboardSampler {
     final List<?> pendingTelemetryList = getPendingTelemetryList(); // If non-null, is FTC Dashboard's 'pendingTelemetry' queue
     Field telemetryPacketFieldOverlayField; // If non-null, is the 'field' field of Telemetry Packet
