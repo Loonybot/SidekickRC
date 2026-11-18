@@ -314,7 +314,7 @@ class DashboardSampler {
                 try {
                     Object canvas = telemetryPacketFieldOverlayField.get(telemetryPacket);
                     if (canvas != null) {
-                        capture.recordInferredDashboardCanvas(canvas);
+                        capture.captureInferredDashboardCanvas(canvas);
                     }
                 } catch (IllegalAccessException ignored) {}
             }

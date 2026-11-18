@@ -31,13 +31,16 @@ class PaintId {
     static final byte DRAW_RECT = 15;
 }
 
-/// API object for rendering.
+/**
+ * Canvas class for visualizations in Sidekick. Thanks to FTC Dashboard for the model.
+ */
 @SuppressWarnings({"unused", "UnusedReturnValue"})
-class Paint {
-    class CanvasOp {
+public class Canvas implements AutoCloseable {
+    /// Helper class for converting FTC Dashboard CanvasOps.
+    class DashboardCanvasOp {
         Object op; // Instance of a class that extends com.acmerobotics.dashboard.canvas.CanvasOp
         Class<?> opClass; // Class type of 'op'
-        CanvasOp(Object op) {
+        DashboardCanvasOp(Object op) {
             this.op = op;
             this.opClass = op.getClass();
         }
@@ -78,12 +81,13 @@ class Paint {
     int bufferRemaining = BUFFER_SIZE; // Amount of buffer space remaining, negative if ran out
     String brushColor; // Currently set brush color
     String penColor; // Currently set pen color
+    boolean submitted = false; // True if the canvas has been submitted to the capture
 
-    /// Public constructor.
-    public Paint() {}
+    /// Package private constructor. Call [Sk#createCanvas()] instead to create a new canvas.
+    Canvas() {}
 
-    /// This private constructor converts a Road Runner canvas to a Sidekick paint object. We do
-    /// **everything** with reflection:
+    /// This package private constructor converts a Road Runner canvas to a Sidekick canvas object.
+    /// We do **everything** with reflection:
     /// - Most of the FTC Dashboard canvas fields we need to access are marked `private`, and we
     ///   can work around that with reflection.
     /// - We can avoid bloating our library by having to include the FTC Dashboard library.
@@ -91,12 +95,12 @@ class Paint {
     ///
     /// See [[FTC Dashboard's Field.js](https://github.com/acmerobotics/ftc-dashboard/blob/master/client/src/components/views/FieldView/Field.js)]
     /// for reference.
-    Paint(Object canvas) {
-        if ((canvas == null) || (!canvas.getClass().getName().equals("com.acmerobotics.dashboard.canvas.Canvas"))) {
+    Canvas(Object dashboardCanvas) {
+        if ((dashboardCanvas == null) || (!dashboardCanvas.getClass().getName().equals("com.acmerobotics.dashboard.canvas.Canvas"))) {
             throw new IllegalArgumentException("Sidekick: Must be a com.acmerobotics.dashboard.canvas Canvas object.");
         }
 
-        List<?> ops = (List<?>) Sidekick.getInstanceField(canvas, "ops", List.class);
+        List<?> ops = (List<?>) Sidekick.getInstanceField(dashboardCanvas, "ops", List.class);
         if (ops == null) {
             capture.minorError("Unexpected null dashboard canvas op");
             return; // ====>
@@ -112,7 +116,8 @@ class Paint {
                 return; // ====>
             }
 
-            CanvasOp op = new CanvasOp(opObject);
+            // Wrap the Dashboard CanvasOp with our own DashboardCanvasOp class:
+            DashboardCanvasOp op = new DashboardCanvasOp(opObject);
             String name = op.getName();
             try {
                 switch (name) {
@@ -204,8 +209,16 @@ class Paint {
         }
     }
 
-    /// Helper for setBrush() and setPen():
+    /// Throws if the canvas has already been submitted.
+    void ensureOpen() {
+        if (submitted) {
+            throw new IllegalStateException("Canvas has already been submitted");
+        }
+    }
+
+    /// Helper for setBrush() and setPen().
     void setColor(String color, byte colorId, byte nullId) {
+        ensureOpen();
         if (color == null) {
             if ((bufferRemaining -= 1) >= 0) {
                 buffer.put(nullId);
@@ -218,51 +231,14 @@ class Paint {
         }
     }
 
-    //----------------------------------------------------------------------------------------------
-    // Public APIs
-
-    /// Can take null or a string like "#ffbc00".
-    public Paint setBrush(String color) {
-        if (!Objects.equals(color, brushColor)) {
-            brushColor = color;
-            setColor(color, PaintId.SET_BRUSH_COLOR, PaintId.SET_NULL_BRUSH);
-        }
-        return this;
-    }
-    public Paint setPen(String color) {
-        if (!Objects.equals(color, penColor)) {
-            penColor = color;
-            setColor(color, PaintId.SET_PEN_COLOR, PaintId.SET_NULL_PEN);
-        }
-        return this;
-    }
-    public Paint scale(double sx, double sy) {
-        if ((bufferRemaining -= 9) >= 0) {
-            buffer.put(PaintId.SCALE);
-            buffer.putFloat((float) sx);
-            buffer.putFloat((float) sy);
-        }
-        return this;
-    }
-    public Paint rotate(double angleInDegrees) {
-        if ((bufferRemaining -= 5) >= 0) {
-            buffer.put(PaintId.ROTATE);
-            buffer.putFloat((float) angleInDegrees);
-        }
-        return this;
-    }
-    public Paint translate(PointD offset) {
-        if ((bufferRemaining -= 9) >= 0) {
-            buffer.put(PaintId.TRANSLATE);
-            buffer.putFloat((float) offset.x);
-            buffer.putFloat((float) offset.y);
-        }
-        return this;
-    }
-    public Paint drawText(PointD position, String text) {
+    /// drawText() is not supported yet.
+    private Canvas drawText(PointD position, String text) {
         return drawText(position, text, 0, false, false, "");
     }
-    public Paint drawText(PointD position, String text, double theta, boolean stroke, boolean usePageFrame, String font) {
+
+    /// drawText() is not supported yet.
+    private Canvas drawText(PointD position, String text, double theta, boolean stroke, boolean usePageFrame, String font) {
+        ensureOpen();
         byte[] stringEncoding = text.getBytes(UTF8);
         byte[] fontEncoding = font.getBytes(UTF8);
         if ((bufferRemaining -= (15 + stringEncoding.length + 1 + fontEncoding.length + 1)) >= 0) {
@@ -279,7 +255,99 @@ class Paint {
         }
         return this;
     }
-    public Paint drawEllipse(PointD center, double rx, double ry) {
+
+
+    //----------------------------------------------------------------------------------------------
+    // Public APIs
+
+    /**
+     * Set the brush color.
+     *
+     * @param color Can be null or a string like "#ffbc00".
+     * @return This canvas for chained calls.
+     */
+    public Canvas setBrush(String color) {
+        ensureOpen();
+        if (!Objects.equals(color, brushColor)) {
+            brushColor = color;
+            setColor(color, PaintId.SET_BRUSH_COLOR, PaintId.SET_NULL_BRUSH);
+        }
+        return this;
+    }
+
+    /**
+     * Set the pen color.
+     *
+     * @param color Can be null or a string like "#ffbc00".
+     * @return This canvas for chained calls.
+     */
+    public Canvas setPen(String color) {
+        ensureOpen();
+        if (!Objects.equals(color, penColor)) {
+            penColor = color;
+            setColor(color, PaintId.SET_PEN_COLOR, PaintId.SET_NULL_PEN);
+        }
+        return this;
+    }
+
+    /**
+     * Scale the current transform. Replaces any previously set scaling.
+     *
+     * @param sx x-factor scale.
+     * @param sy y-factor scale.
+     * @return This canvas for chained calls.
+     */
+    public Canvas scale(double sx, double sy) {
+        ensureOpen();
+        if ((bufferRemaining -= 9) >= 0) {
+            buffer.put(PaintId.SCALE);
+            buffer.putFloat((float) sx);
+            buffer.putFloat((float) sy);
+        }
+        return this;
+    }
+
+    /**
+     * Rotate the current transform. Replaces any previously set rotation.
+     *
+     * @param angleInDegrees Angle in degrees.
+     * @return This canvas for chained calls.
+     */
+    public Canvas rotate(double angleInDegrees) {
+        ensureOpen();
+        if ((bufferRemaining -= 5) >= 0) {
+            buffer.put(PaintId.ROTATE);
+            buffer.putFloat((float) angleInDegrees);
+        }
+        return this;
+    }
+
+    /**
+     * Set the offset for the current transform. Replaces any previously set translation.
+     *
+     * @param offset Offset.
+     * @return This canvas for chained calls.
+     */
+    public Canvas translate(PointD offset) {
+        ensureOpen();
+        if ((bufferRemaining -= 9) >= 0) {
+            buffer.put(PaintId.TRANSLATE);
+            buffer.putFloat((float) offset.x);
+            buffer.putFloat((float) offset.y);
+        }
+        return this;
+    }
+
+    /**
+     * Draw an ellipse.
+     *
+     * @param center Center of the ellipse in world space.
+     * @param rx Radius in x-direction.
+     * @param ry Radius in y-direction.
+     * @return This canvas for chained calls.
+     */
+    public Canvas drawEllipse(PointD center, double rx, double ry) {
+        ensureOpen();
         if ((bufferRemaining -= 17) >= 0) {
             buffer.put(PaintId.DRAW_ELLIPSE);
             buffer.putFloat((float) center.x);
@@ -289,7 +357,15 @@ class Paint {
         }
         return this;
     }
-    public Paint drawPolygon(PointD[] points) {
+
+    /**
+     * Draw a polygon.
+     *
+     * @param points Array of points in world space.
+     * @return This canvas for chained calls.
+     */
+    public Canvas drawPolygon(PointD[] points) {
+        ensureOpen();
         if ((bufferRemaining -= (3 + 8*points.length)) >= 0) {
             if (points.length < Short.MAX_VALUE / 10) {
                 buffer.put(PaintId.DRAW_POLYGON);
@@ -302,7 +378,15 @@ class Paint {
         }
         return this;
     }
-    public Paint drawPolyline(PointD[] points) {
+
+    /**
+     * Draw a connected list of lines.
+     *
+     * @param points Array of points in world space.
+     * @return This canvas for chained calls.
+     */
+    public Canvas drawPolyline(PointD[] points) {
+        ensureOpen();
         if ((bufferRemaining -= (3 + 8*points.length)) >= 0) {
             if (points.length < Short.MAX_VALUE / 10) {
                 buffer.put(PaintId.DRAW_POLYLINE);
@@ -315,7 +399,18 @@ class Paint {
         }
         return this;
     }
-    public Paint drawLine(double x1, double y1, double x2, double y2) {
+
+    /**
+     * Draw a line.
+     *
+     * @param x1 Start of line in world space.
+     * @param y1 Start of line in world space.
+     * @param x2 End of line in world space.
+     * @param y2 End of line in world space.
+     * @return This canvas for chained calls.
+     */
+    public Canvas drawLine(double x1, double y1, double x2, double y2) {
+        ensureOpen();
         if ((bufferRemaining -= 17) >= 0) {
             buffer.put(PaintId.DRAW_LINE);
             buffer.putFloat((float) x1);
@@ -325,7 +420,18 @@ class Paint {
         }
         return this;
     }
-    public Paint drawRect(double x, double y, double width, double height) {
+
+    /**
+     * Draw a rectangle.
+     *
+     * @param x X coordinate of the corner, in world space.
+     * @param y Y coordinate of the corner, in world space.
+     * @param width Width of the rectangle, in world space.
+     * @param height Height of the rectangle, in world space.
+     * @return This canvas for chained calls.
+     */
+    public Canvas drawRect(double x, double y, double width, double height) {
+        ensureOpen();
         if ((bufferRemaining -= 17) >= 0) {
             buffer.put(PaintId.DRAW_RECT);
             buffer.putFloat((float) x);
@@ -335,18 +441,55 @@ class Paint {
         }
         return this;
     }
-    public Paint setPenWidth(double width) {
+
+    /**
+     * Set the pen width.
+     *
+     * @param width Width of the pen, in world space pixels.
+     * @return This canvas for chained calls.
+     */
+    public Canvas setPenWidth(double width) {
+        ensureOpen();
         if ((bufferRemaining -= 5) >= 0) {
             buffer.put(PaintId.SET_PEN_WIDTH);
             buffer.putFloat((float) width);
         }
         return this;
     }
-    public Paint setOpacity(double opacity) {
+
+    /**
+     * Set the opacity.
+     *
+     * @param opacity Opacity, from 0.0 (fully transparent) to 1.0 (opaque).
+     * @return This canvas for chained calls.
+     */
+    public Canvas setOpacity(double opacity) {
+        ensureOpen();
         if ((bufferRemaining -= 5) >= 0) {
             buffer.put(PaintId.SET_OPACITY);
             buffer.putFloat((float) opacity);
         }
         return this;
+    }
+
+    /**
+     * Auto-closable close() method.
+     */
+    @Override
+    public void close() {
+        if (!submitted) {
+            submit();
+        }
+    }
+
+    /**
+     * Submit the accumulated canvas commands to be recorded into the capture.
+      */
+    public void submit() {
+        ensureOpen();
+        if (Capture.instance != null) {
+            Capture.instance.recordCanvas(this);
+        }
+        submitted = true;
     }
 }

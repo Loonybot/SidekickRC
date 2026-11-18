@@ -6,6 +6,7 @@ package com.loonybot.sidekick;
 import androidx.annotation.NonNull;
 
 import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
+import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
 
 /**
  * Use this {@link Sk} class to configure Sidekick and add capture data.
@@ -224,15 +225,40 @@ public class Sk {
     }
 
     /**
-     * Record an FTC Dashboard Canvas object in the archive.
+     * Create a native Sidekick Canvas object for adding visualizations to the Sidekick field view.
+     * Use the {@link Canvas} APIs to record drawing commands to the canvas and then call
+     * {@link Canvas#submit()} to record the result in the Sidekick capture. The drawing will be
+     * shown in the Sidekick application's field view; it will be shown until it's replaced by
+     * a new submit.<br>
+     * <br>
+     * The coordinate space can be either the official FTC coordinate space or the Pedro Pathing
+     * coordinate space, as chosen in the Sidekick application field settings when viewing the
+     * results. For the official coordinate space, the origin is at the center of the field and
+     * coordinate values range from -72 to 72 inches. For the Pedro Pathing coordinate space,
+     * the origin is in the bottom-left and coordinate values range from 0 to 144 inches.<br>
+     * <br>
+     * The {@link Canvas#translate}, {@link Canvas#rotate} and {@link Canvas#scale} APIs can be
+     * used to modify the coordinate space but the transforms are not cumulative;
+     * a second call to {@link Canvas#scale} will replace the first call rather than appending,
+     * for example.
      *
-     * @param canvas The Dashboard Canvas object with drawing commands to record; must be of type
-     *               com.acmerobotics.dashboard.canvas.
+     * @return The resulting Canvas object.
+     */
+    public static Canvas createCanvas() {
+        return new Canvas();
+    }
+
+    /**
+     * Record an FTC Dashboard Canvas object in the archive. The FTC Dashboard Canvas object gets
+     * automatically converted to a native Sidekick Canvas and then recorded.
+     *
+     * @param dashboardCanvas The FTC Dashboard Canvas object to be recorded; it must have been
+     *                        created by FTC Dashboard and be of type com.acmerobotics.dashboard.canvas.
      * @throws IllegalArgumentException if the object isn't the right type.
      */
-    public static void captureCanvas(@NonNull Object canvas) {
+    public static void captureDashboardCanvas(@NonNull Object dashboardCanvas) {
         if (Capture.instance != null) {
-            Capture.instance.captureCanvas(canvas);
+            Capture.instance.captureDashboardCanvas(dashboardCanvas);
         }
     }
 
@@ -281,9 +307,20 @@ public class Sk {
      *
      * @param pose The current pose of the robot.
      */
-    public static void pose(@NonNull Pose2D pose) {
+    public static void setRobotPose(@NonNull Pose2D pose) {
         if (Capture.instance != null) {
-            Capture.instance.pose(pose);
+            Capture.instance.recordRobotPose(pose);
+        }
+    }
+
+    /**
+     * Register the camera's position and orientation on the robot for field visualizations.
+     * Can be called regularly to update the camera's position if mounted on a turret. Sidekick
+     * doesn't really need the camera's height, and roll is assumed to be zero.
+     */
+    public static void setCameraPose(@NonNull Pose3D pose) {
+        if (Capture.instance != null) {
+            Capture.instance.recordCameraPose(pose);
         }
     }
 

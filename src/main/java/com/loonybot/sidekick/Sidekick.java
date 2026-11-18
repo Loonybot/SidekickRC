@@ -470,16 +470,16 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     void oneTimeOpModeInitialization() {
         // Register default serializers:
         registerSerializer(
-                // Record canonically in inches and degrees; app will convert to preferred units:
-                new Pose2D(DistanceUnit.INCH, 0, 0, AngleUnit.DEGREES, 0),
+                // Record canonically in inches and radians; app will convert to preferred units:
+                new Pose2D(DistanceUnit.INCH, 0, 0, AngleUnit.RADIANS, 0),
                 "x=in, y=in, heading=deg",
                 x -> new Double[] {
                         x.getX(DistanceUnit.INCH),
                         x.getY(DistanceUnit.INCH),
-                        x.getHeading(AngleUnit.DEGREES)
+                        x.getHeading(AngleUnit.RADIANS)
                 });
         registerSerializer(
-                // Record canonically in inches and degrees; app will convert to preferred units:
+                // Record canonically in inches and radians; app will convert to preferred units:
                 new Position(DistanceUnit.INCH, 0, 0, 0, 0),
                 "x=in, y=in, z=in",
                 x -> new Double[] {
@@ -488,17 +488,17 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
                         DistanceUnit.INCH.fromUnit(x.unit, x.z),
                 });
         registerSerializer(
-                // Record canonically in degrees and degrees; app will convert to preferred units:
-                new YawPitchRollAngles(AngleUnit.DEGREES, 0, 0, 0, 0),
+                // Record canonically in degrees and radians; app will convert to preferred units:
+                new YawPitchRollAngles(AngleUnit.RADIANS, 0, 0, 0, 0),
                 "yaw=deg, pitch=deg, roll=deg",
                 x -> new Double[] {
-                        x.getYaw(AngleUnit.DEGREES),
-                        x.getPitch(AngleUnit.DEGREES),
-                        x.getRoll(AngleUnit.DEGREES)
+                        x.getYaw(AngleUnit.RADIANS),
+                        x.getPitch(AngleUnit.RADIANS),
+                        x.getRoll(AngleUnit.RADIANS)
                 });
         registerSerializer(
                 new Pose3D(new Position(DistanceUnit.INCH, 0, 0, 0, 0),
-                        new YawPitchRollAngles(AngleUnit.DEGREES, 0, 0, 0, 0)),
+                           new YawPitchRollAngles(AngleUnit.RADIANS, 0, 0, 0, 0)),
                 "position=, orientation=",
                 x -> new Object[] {
                         x.getPosition(),

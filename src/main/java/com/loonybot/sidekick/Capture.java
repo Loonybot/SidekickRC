@@ -72,6 +72,7 @@ import org.firstinspires.ftc.robotcore.external.navigation.AngleUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.AngularVelocity;
 import org.firstinspires.ftc.robotcore.external.navigation.DistanceUnit;
 import org.firstinspires.ftc.robotcore.external.navigation.Pose2D;
+import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
 import org.firstinspires.ftc.robotcore.external.navigation.UnnormalizedAngleUnit;
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryImpl;
 import org.firstinspires.ftc.robotcore.internal.opmode.TelemetryInternal;
@@ -268,7 +269,7 @@ class RecordId {
     static final int LOG_CLEAR                             = 28;
     static final int GAMEPAD1_DATA                         = 29;
     static final int GAMEPAD2_DATA                         = 30;
-    static final int PAINT                                 = 31;
+    static final int CANVAS                                = 31;
     static final int NOTE_STRING                           = 32;
     static final int LOOP                                  = 33;
     static final int SAMPLER_VALUES                        = 34;
@@ -282,9 +283,10 @@ class RecordId {
     static final int CREATE_STOPWATCH                      = 42;
     static final int STOPWATCH_START                       = 43;
     static final int STOPWATCH_STOP                        = 44;
-    static final int POSE                                  = 45;
-    static final int BEGIN_NO_MOVEMENT                     = 46;
-    static final int END_NO_MOVEMENT                       = 47;
+    static final int BEGIN_NO_MOVEMENT                     = 45;
+    static final int END_NO_MOVEMENT                       = 46;
+    static final int ROBOT_POSE                            = 47;
+    static final int CAMERA_POSE                           = 48;
 
     // Meta data:
     static final int FIRST_DYNAMIC = 100; // First dynamic record ID
@@ -360,7 +362,6 @@ class ManifestJson {
     public String deviceModel = android.os.Build.MODEL; // Model of the Robot Controller
     public int availableProcessors = Runtime.getRuntime().availableProcessors(); // Count of CPU cores
     public long freeStorageSpace = new StatFs(Sidekick.SD_CARD_PATH).getAvailableBytes(); // Free space on the SD card, in bytes
-
     public boolean isBlocksOpMode; // True if recorded from BlocksOpMode
     public boolean isLinearOpMode; // True if LinearOpMode was used
     public boolean usesPedroPathing; // True if Pedro Pathing is used
@@ -2185,6 +2186,12 @@ class Capture {
 
             // Finish off the Archive section:
             endNanoTime = nanoTime();
+            if (!hasStarted()) {
+                // If the op mode was stopped before Start was pressed, then make all times
+                // negative relative to the end time:
+                startNanoTime = endNanoTime;
+                startUnixTime = System.currentTimeMillis();
+            }
             if ((chunkRemaining -= 5) < 0)
                 nextChunk();
             chunk.putShort((short) RecordId.END_ARCHIVE);
@@ -2247,11 +2254,11 @@ class Capture {
     }
 
     /// Add the contents of an FTC Dashboard canvas to the capture.
-    void captureCanvas(Object canvas) {
-        recordPaint(new Paint(canvas), CanvasFlags.ROTATED_FIELD);
+    void captureDashboardCanvas(Object dashboardCanvas) {
+        recordCanvas(new Canvas(dashboardCanvas), CanvasFlags.ROTATED_FIELD);
     }
-    void recordInferredDashboardCanvas(Object canvas) {
-        recordPaint(new Paint(canvas), CanvasFlags.ROTATED_FIELD | CanvasFlags.INFERRED);
+    void captureInferredDashboardCanvas(Object dashboardCanvas) {
+        recordCanvas(new Canvas(dashboardCanvas), CanvasFlags.ROTATED_FIELD | CanvasFlags.INFERRED);
     }
 
     /// Add data from a gamepad input packet to the capture.
@@ -2325,31 +2332,46 @@ class Capture {
         }
     }
 
-    /// Add the contents of a [Paint] object to the capture.
-    void recordPaint(Paint paint) { recordPaint(paint, 0); }
-    void recordPaint(Paint paint, int flags) {
+    /// Add the contents of a [Canvas] object to the capture.
+    void recordCanvas(Canvas canvas) { recordCanvas(canvas, 0); }
+    void recordCanvas(Canvas canvas, int flags) {
         synchronized (sidekickLock) {
-            if (beginRecord(RecordId.PAINT, 3)) {
-                ByteBuffer buffer = paint.buffer;
+            if (beginRecord(RecordId.CANVAS, 3)) {
+                ByteBuffer buffer = canvas.buffer;
                 int size = buffer.position();
 
                 chunk.put((byte) flags);
                 chunk.putShort((short) size);
-                putBytes(paint.buffer.array(), size);
+                putBytes(canvas.buffer.array(), size);
                 assertChunk();
             }
         }
     }
 
-    /// API to record the current pose.
-    void pose(Pose2D pose) {
+    /// API to record the robot's current pose.
+    void recordRobotPose(Pose2D pose) {
         synchronized (sidekickLock) {
-            if (beginRecord(RecordId.POSE, 12)) {
+            if (beginRecord(RecordId.ROBOT_POSE, 12)) {
                 // Record inches and radians; the app will convert to the preferred units:
                 chunk.putFloat((float) pose.getX(DistanceUnit.INCH));
                 chunk.putFloat((float) pose.getY(DistanceUnit.INCH));
                 chunk.putFloat((float) pose.getHeading(AngleUnit.RADIANS));
                 assertChunk();
+            }
+        }
+    }
+
+    /// API to record the robot's current pose on the robot.
+    void recordCameraPose(Pose3D pose) {
+        synchronized (sidekickLock) {
+            if (beginRecord(RecordId.CAMERA_POSE, 25)) {
+                chunk.put((byte) 0); // Reserved camera identifier
+                chunk.putFloat((float) DistanceUnit.INCH.fromUnit(pose.getPosition().unit, pose.getPosition().x));
+                chunk.putFloat((float) DistanceUnit.INCH.fromUnit(pose.getPosition().unit, pose.getPosition().y));
+                chunk.putFloat((float) DistanceUnit.INCH.fromUnit(pose.getPosition().unit, pose.getPosition().z));
+                chunk.putFloat((float) pose.getOrientation().getYaw(AngleUnit.RADIANS));
+                chunk.putFloat((float) pose.getOrientation().getPitch(AngleUnit.RADIANS));
+                chunk.putFloat((float) pose.getOrientation().getRoll(AngleUnit.RADIANS));
             }
         }
     }
