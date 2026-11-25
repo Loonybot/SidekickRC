@@ -1,4 +1,4 @@
-/// Common interface for all objects wrapped by the Sidekick proxy builder.
+/// Sidekick graphics visualization logic.
 ///
 /// Copyright James Goossen.
 package com.loonybot.sidekick;
@@ -14,21 +14,24 @@ import java.util.Objects;
 
 /// Paint command identifiers.
 class PaintId {
-    static final byte SET_NULL_BRUSH = 1;
-    static final byte SET_BRUSH_COLOR = 2;
-    static final byte SET_NULL_PEN = 3;
-    static final byte SET_PEN_COLOR = 4;
-    static final byte SET_PEN_WIDTH = 5;
-    static final byte SET_OPACITY = 6;
-    static final byte SCALE = 7;
-    static final byte ROTATE = 8;
-    static final byte TRANSLATE = 9;
-    static final byte DRAW_TEXT = 10;
-    static final byte DRAW_ELLIPSE = 11;
-    static final byte DRAW_POLYGON = 12;
-    static final byte DRAW_POLYLINE = 13;
-    static final byte DRAW_LINE = 14;
-    static final byte DRAW_RECT = 15;
+    @SuppressWarnings("unused")
+    static final byte RESERVED = 0;
+    static final byte SET_COORDINATE_SPACE = 1;
+    static final byte SET_NULL_BRUSH = 2;
+    static final byte SET_BRUSH_COLOR = 3;
+    static final byte SET_NULL_PEN = 4;
+    static final byte SET_PEN_COLOR = 5;
+    static final byte SET_PEN_WIDTH = 6;
+    static final byte SET_OPACITY = 7;
+    static final byte SCALE = 8;
+    static final byte ROTATE = 9;
+    static final byte TRANSLATE = 10;
+    static final byte DRAW_TEXT = 11;
+    static final byte DRAW_ELLIPSE = 12;
+    static final byte DRAW_POLYGON = 13;
+    static final byte DRAW_POLYLINE = 14;
+    static final byte DRAW_LINE = 15;
+    static final byte DRAW_RECT = 16;
 }
 
 /**
@@ -122,13 +125,13 @@ public class Graphics {
             try {
                 switch (name) {
                     case "Scale":
-                        scale((double) op.f("scaleX"), (double) op.f("scaleY"));
+                        setScale((double) op.f("scaleX"), (double) op.f("scaleY"));
                         break;
                     case "Rotation":
-                        rotate(Math.toDegrees((double) op.f("rotation")));
+                        setRotation(Math.toDegrees((double) op.f("rotation")));
                         break;
                     case "Translate":
-                        translate(new PointD((double) op.f("x"), (double) op.f("y")));
+                        setTranslation((double) op.f("x"), (double) op.f("y"));
                         break;
                     case "Text":
                         // drawText basically uses only the pen for the text color:
@@ -137,9 +140,17 @@ public class Graphics {
                         } else {
                             setPen(canvasBrush);
                         }
-                        drawText(new PointD((double) op.f("x"), (double) op.f("y")), (String) op.f("text"),
-                                (double) op.f("theta"), (boolean) op.f("stroke"), (boolean) op.f("usePageFrame"),
-                                (String) op.f("font"));
+                        boolean usePageFrame = (boolean) op.f("usePageFrame");
+                        if (usePageFrame) {
+                            setCoordinateSpace(CoordinateSpace.WINDOW);
+                        }
+                        // Note that 'stroke' is ignored...
+                        drawText((String) op.f("text"),
+                                (double) op.f("x"), (double) op.f("y"),
+                                (String) op.f("font"), (double) op.f("theta"));
+                        if (usePageFrame) {
+                            setCoordinateSpace(CoordinateSpace.FIELD);
+                        }
                         break;
                     case "Circle":
                         if ((boolean) op.f("stroke")) {
@@ -149,7 +160,7 @@ public class Graphics {
                             setBrush(canvasBrush);
                             setPen(null);
                         }
-                        drawEllipse(new PointD((double) op.f("x"), (double) op.f("y")),
+                        drawEllipse((double) op.f("x"), (double) op.f("y"),
                                 (double) op.f("radius"), (double) op.f("radius"));
                         break;
                     case "Polygon": {
@@ -193,8 +204,9 @@ public class Graphics {
                         setPenWidth((int) op.f("width"));
                         break;
                     case "Image":
-                    case "Grid": // TODO: Add support
-                        break;
+                        break; // Not supported
+                    case "Grid":
+                        break; // TODO: Add support
                     case "Alpha":
                         setOpacity((double) op.f("alpha"));
                         break;
@@ -231,34 +243,17 @@ public class Graphics {
         }
     }
 
-    /// drawText() is not supported yet.
-    private Graphics drawText(PointD position, String text) {
-        return drawText(position, text, 0, false, false, "");
-    }
+    //----------------------------------------------------------------------------------------------
+    // Public APIs
 
-    /// drawText() is not supported yet.
-    private Graphics drawText(PointD position, String text, double theta, boolean stroke, boolean usePageFrame, String font) {
+    public Graphics setCoordinateSpace(CoordinateSpace space) {
         ensureOpen();
-        byte[] stringEncoding = text.getBytes(UTF8);
-        byte[] fontEncoding = font.getBytes(UTF8);
-        if ((bufferRemaining -= (15 + stringEncoding.length + 1 + fontEncoding.length + 1)) >= 0) {
-            buffer.put(PaintId.DRAW_TEXT);
-            buffer.putFloat((float) position.x);
-            buffer.putFloat((float) position.y);
-            buffer.put(stringEncoding);
-            buffer.put(NULL_TERMINATOR);
-            buffer.putFloat((float) theta);
-            buffer.put((byte) (stroke ? 1 : 0));
-            buffer.put((byte) (usePageFrame ? 1 : 0));
-            buffer.put(fontEncoding);
-            buffer.put(NULL_TERMINATOR);
+        if ((bufferRemaining -= 2) >= 0) {
+            buffer.put(PaintId.SET_COORDINATE_SPACE);
+            buffer.put((byte) space.ordinal());
         }
         return this;
     }
-
-
-    //----------------------------------------------------------------------------------------------
-    // Public APIs
 
     /**
      * Set the brush color.
@@ -291,13 +286,14 @@ public class Graphics {
     }
 
     /**
-     * Scale the current transform. Replaces any previously set scaling.
+     * Scale the current transform. Replaces any previously set scaling. Applied after
+     * translation.
      *
      * @param sx x-factor scale.
      * @param sy y-factor scale.
      * @return This graphics object for chained calls.
      */
-    public Graphics scale(double sx, double sy) {
+    public Graphics setScale(double sx, double sy) {
         ensureOpen();
         if ((bufferRemaining -= 9) >= 0) {
             buffer.put(PaintId.SCALE);
@@ -308,12 +304,13 @@ public class Graphics {
     }
 
     /**
-     * Rotate the current transform. Replaces any previously set rotation.
+     * Rotate the current transform. Replaces any previously set rotation. Applied after
+     * translation.
      *
      * @param angleInDegrees Angle in degrees.
      * @return This graphics object for chained calls.
      */
-    public Graphics rotate(double angleInDegrees) {
+    public Graphics setRotation(double angleInDegrees) {
         ensureOpen();
         if ((bufferRemaining -= 5) >= 0) {
             buffer.put(PaintId.ROTATE);
@@ -323,17 +320,20 @@ public class Graphics {
     }
 
     /**
-     * Set the offset for the current transform. Replaces any previously set translation.
+     * Set an offset to be added to every world space coordinate. Replaces any previously set
+     * translation. Translation is applied after rotation and scaling is done, so it is always
+     * specified in un-rotated, un-scaled field coordinates.
      *
-     * @param offset Offset.
+     * @param x x offset in field coordinates.
+     * @param y y offset in field coordinates.
      * @return This graphics object for chained calls.
      */
-    public Graphics translate(PointD offset) {
+    public Graphics setTranslation(double x, double y) {
         ensureOpen();
         if ((bufferRemaining -= 9) >= 0) {
             buffer.put(PaintId.TRANSLATE);
-            buffer.putFloat((float) offset.x);
-            buffer.putFloat((float) offset.y);
+            buffer.putFloat((float) x);
+            buffer.putFloat((float) y);
         }
         return this;
     }
@@ -341,17 +341,18 @@ public class Graphics {
     /**
      * Draw an ellipse.
      *
-     * @param center Center of the ellipse in world space.
+     * @param x Center of the ellipse in world space.
+     * @param y Center of the ellipse in world space.
      * @param rx Radius in x-direction.
      * @param ry Radius in y-direction.
      * @return This graphics object for chained calls.
      */
-    public Graphics drawEllipse(PointD center, double rx, double ry) {
+    public Graphics drawEllipse(double x, double y, double rx, double ry) {
         ensureOpen();
         if ((bufferRemaining -= 17) >= 0) {
             buffer.put(PaintId.DRAW_ELLIPSE);
-            buffer.putFloat((float) center.x);
-            buffer.putFloat((float) center.y);
+            buffer.putFloat((float) x);
+            buffer.putFloat((float) y);
             buffer.putFloat((float) rx);
             buffer.putFloat((float) ry);
         }
@@ -430,7 +431,7 @@ public class Graphics {
      * @param height Height of the rectangle, in world space.
      * @return This graphics object for chained calls.
      */
-    public Graphics drawRect(double x, double y, double width, double height) {
+    public Graphics drawRectangle(double x, double y, double width, double height) {
         ensureOpen();
         if ((bufferRemaining -= 17) >= 0) {
             buffer.put(PaintId.DRAW_RECT);
@@ -438,6 +439,45 @@ public class Graphics {
             buffer.putFloat((float) y);
             buffer.putFloat((float) width);
             buffer.putFloat((float) height);
+        }
+        return this;
+    }
+
+    /**
+     * Draw simple text.
+     *
+     * @param text Text to be drawn.
+     * @param x Lower-left start position of the text, in page space.
+     * @param y Lower-left start position of the text, in page space.
+     * @return This graphics object for chained calls.
+     */
+    public Graphics drawText(String text, double x, double y) {
+        return drawText(text, x, y, "", 0);
+    }
+
+    /**
+     * Draw text with advanced controls.
+     *
+     * @param text Text to be drawn.
+     * @param x Lower-left start position of the text.
+     * @param y Lower-left start position of the text
+     * @param font Font in HTML Canvas font format, e.g.: "italic bold 12px Arial"
+     * @param theta Rotation of the text, in degrees.
+     * @return This graphics object for chained calls.
+     */
+    public Graphics drawText(String text, double x, double y, String font, double theta) {
+        ensureOpen();
+        byte[] stringEncoding = text.getBytes(UTF8);
+        byte[] fontEncoding = font.getBytes(UTF8);
+        if ((bufferRemaining -= (14 + stringEncoding.length + 1 + fontEncoding.length + 1)) >= 0) {
+            buffer.put(PaintId.DRAW_TEXT);
+            buffer.putFloat((float) x);
+            buffer.putFloat((float) y);
+            buffer.put(stringEncoding);
+            buffer.put(NULL_TERMINATOR);
+            buffer.putFloat((float) theta);
+            buffer.put(fontEncoding);
+            buffer.put(NULL_TERMINATOR);
         }
         return this;
     }
@@ -479,7 +519,7 @@ public class Graphics {
         if (submitted)
             return;
         if (Capture.instance != null) {
-            Capture.instance.recordCanvas(this);
+            Capture.instance.recordGraphics(this);
         }
         submitted = true;
     }

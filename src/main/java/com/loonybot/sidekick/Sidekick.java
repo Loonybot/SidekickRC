@@ -1,4 +1,4 @@
-/// Sidekick state maintained across opModes and captures.
+/// Sidekick state maintained across op modes and captures.
 ///
 /// Copyright James Goossen.
 package com.loonybot.sidekick;
@@ -134,6 +134,7 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     BiFunction<Integer, Object, Object> emulatorCallback; // Emulator enlightenment callback, if any
     ProxyBuilder proxyBuilder; // Byte Buddy proxy builder
     String appBuildTime = ""; // Build time of the currently running app
+    String lastLogcatTime; // Time that the last logcat was saved (null if none saved yet)
     HashMap<Class<?>, SerializerInfo<?>> serializersMap = new HashMap<>(); // Map of serializers for custom types
     LinkedList<SerializerInfo<?>> serializersList = new LinkedList<>(); // List of all serializers
     Set<Integer> suppressedIssues = new HashSet<>(); // Issue codes that the user wants suppressed
@@ -141,6 +142,8 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     HashMap<Thread, ThreadRegister> threadRegistry = new HashMap<>(); // Registered threads
     String captureName = ""; // Name specified by the user for the current capture; includes ".sidekick"
     int retentionDays = 7; // Default retention period, in days
+    FieldCoordinateSpace fieldCoordinateSpace = usesClass("com.pedropathing.api.Path")
+        ? FieldCoordinateSpace.PEDRO_PATHING : FieldCoordinateSpace.FTC_ROTATED; // Default field coordinate space
     String[] userSetSamplers = null; // If non-null, the user has specified a set of sampler IDs to query
 
     final private NanoWSD server = new NanoWSD(WEB_SOCKET_PORT) {
@@ -161,6 +164,16 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
     }
     static void logI(String format, Object... args) { // Info
         Log.i(TAG, safeFormat(format, args));
+    }
+
+    /// Return true if the fully specified class name is present.
+    boolean usesClass(@SuppressWarnings("SameParameterValue") String className) {
+        try {
+            Class.forName(className);
+            return true;
+        } catch (ClassNotFoundException ignored) {
+            return false;
+        }
     }
 
     /// Reflection helper to instantiate a class that has a protected or private constructor
@@ -264,8 +277,14 @@ public class Sidekick implements OpModeManagerNotifier.Notifications {
             if (isInitialized) {
                 return false;
             }
-            Sidekick.instance.retentionDays = Math.max(days, 1);
+            retentionDays = Math.max(days, 1);
             return true;
+        }
+    }
+
+    void setFieldCoordinateSpace(FieldCoordinateSpace space) {
+        synchronized(sidekickLock) {
+            fieldCoordinateSpace = space;
         }
     }
 

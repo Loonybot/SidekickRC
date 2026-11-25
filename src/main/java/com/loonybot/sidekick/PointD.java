@@ -4,7 +4,7 @@
 package com.loonybot.sidekick;
 
 /**
- * A 2D point using doubles, for Sidekick's Canvas functionality.
+ * A 2D point using doubles, for Sidekick's Graphics functionality.
  */
 public class PointD {
     public double x;

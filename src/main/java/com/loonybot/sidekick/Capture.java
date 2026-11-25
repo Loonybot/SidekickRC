@@ -57,6 +57,7 @@ import com.qualcomm.robotcore.hardware.ServoController;
 import com.qualcomm.robotcore.hardware.TouchSensor;
 import com.qualcomm.robotcore.hardware.TouchSensorMultiplexer;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
+import com.qualcomm.robotcore.hardware.configuration.LynxConstants;
 import com.qualcomm.robotcore.hardware.configuration.annotations.AnalogSensorType;
 import com.qualcomm.robotcore.hardware.configuration.annotations.DigitalIoDeviceType;
 import com.qualcomm.robotcore.hardware.configuration.annotations.I2cDeviceType;
@@ -269,7 +270,7 @@ class RecordId {
     static final int LOG_CLEAR                             = 28;
     static final int GAMEPAD1_DATA                         = 29;
     static final int GAMEPAD2_DATA                         = 30;
-    static final int CANVAS                                = 31;
+    static final int GRAPHICS                              = 31;
     static final int NOTE_STRING                           = 32;
     static final int LOOP                                  = 33;
     static final int SAMPLER_VALUES                        = 34;
@@ -286,7 +287,7 @@ class RecordId {
     static final int BEGIN_NO_MOVEMENT                     = 45;
     static final int END_NO_MOVEMENT                       = 46;
     static final int ROBOT_POSE                            = 47;
-    static final int CAMERA_POSE                           = 48;
+    static final int CAMERA_INFORMATION                    = 48;
 
     // Meta data:
     static final int FIRST_DYNAMIC = 100; // First dynamic record ID
@@ -319,7 +320,6 @@ class VarargsFlags {
 /// Canvas flags.
 class CanvasFlags {
     static final int INFERRED = 0x1; // Canvas call is inferred from a Dashboard queue
-    static final int ROTATED_FIELD = 0x2; // Rendering assumes a rotated field
 }
 
 /// Bus types.
@@ -358,14 +358,15 @@ class LynxJson {
 class ManifestJson {
     public String platform = "RC"; // "MRC" for Mobile Robot Controller
     public String sdkVersion = AppUtil.getSdkVersionString(); // "9.0.1"
+    public String osVersion = LynxConstants.getControlHubOsVersion(); // "1.1.3"
     public int pid = android.os.Process.myPid(); // Linux process ID of the FTC app
     public String deviceModel = android.os.Build.MODEL; // Model of the Robot Controller
     public int availableProcessors = Runtime.getRuntime().availableProcessors(); // Count of CPU cores
     public long freeStorageSpace = new StatFs(Sidekick.SD_CARD_PATH).getAvailableBytes(); // Free space on the SD card, in bytes
     public boolean isBlocksOpMode; // True if recorded from BlocksOpMode
     public boolean isLinearOpMode; // True if LinearOpMode was used
-    public boolean usesPedroPathing; // True if Pedro Pathing is used
     public boolean isCompliantRobotName; // True if the Robot Controller name is compliant
+    public boolean usesCamera; // True using a Limelight, webcam or built-in camera
     public int[] suppressedIssues = new int[0]; // Array of issue codes to disable
     public LynxJson[] lynxes; // Lynx module information, indexed by LynxModuleInfo.id
     public int pinpointDeviceVersion; // GoBilda Pinpoint device version; 0 if not present
@@ -378,6 +379,7 @@ class ManifestJson {
     public String appBuildTime = ""; // "2026-02-04T19:00:19.296-0800"
     public boolean[] gamepadIsPs4 = new boolean[2]; // False if gamepad is Xbox-compatible, true if PS4
     public boolean isExcessive; // True if the accumulated capture size was truncated
+    public int fieldCoordinateSpace; /// [FieldCoordinateSpace] preferred field coordinate space
     public String[] limelightPipelines = new String[10]; // Limelight pipeline descriptors
 }
 
@@ -622,7 +624,7 @@ class Capture {
         }
 
         /// This is another argument consumer similar to [Capture#putIntegerObject], et al., except
-        /// that it comes bundled with additional state to handle the complexity of serializing an
+        /// that it comes bundled with additional state to handle the complexity of serializing oan
         /// list or an array.
         class ListArrayPutter {
             static final int MAX_ARRAY_SIZE = 250; // The count fits into an unsigned byte
@@ -825,7 +827,6 @@ class Capture {
     String robotName; // E.g., "123-RC"
     String nameDateAndTime; // Root of the capture file name that includes the robot name, date and time
     Section[] sections; // Data on all capture sections
-    String lastLogcatTime; // Time that the last logcat was saved (null if none saved yet)
     int opModeTid; // Linux TID of the OpMode thread; zero if not yet known
     ThreadDescriptor opModeThreadDescriptor; // Descriptor for the OpMode thread; null if not yet seen
     long currentThreadId; /// Java ID of most recent thread to write to the archive (not the
@@ -856,7 +857,7 @@ class Capture {
     byte[][] lastLynxBulkPayload = new byte[MAX_LYNX_COUNT][BULK_DATA_BYTE_COUNT]; // Last recorded bulk payload
     boolean pinpointSetBulkReadScope = false; /// True if [GoBildaPinpointDriver#setBulkReadScope] has been called
     CountDownLatch fileDoneLatch = new CountDownLatch(1); // Signals when the file is done being written
-    boolean usingCamera = false; // True if using webcam or built-in camera (not a Limelight)
+    boolean usesNonLimelightCamera = false; // True if using webcam or built-in camera (not a Limelight)
     String limelightAddress; // IP address of a Limelight camera found during Init, null if none
     LimelightVideo limelightCapture; // Video capture for the Limelight camera, null if not started
     int nextStopwatchId; // ID of the next stopwatch object to be created
@@ -1196,13 +1197,11 @@ class Capture {
         if (limelightAddress != null) {
             Sidekick.logI("Starting Limelight capture at start");
             startLimelightCapture();
-        } else {
-            Sidekick.logI("No Limelight found at start");
-        }
+        } 
 
         // Ask a connected PC to potentially start a screen capture via ADB:
         int timeLimit = opMode.getClass().isAnnotationPresent(TeleOp.class) ? 120 : 30; // Seconds
-        Socket.broadcastStartScreenRecord(videoRootName + ".mp4", usingCamera, timeLimit);
+        Socket.broadcastStartScreenRecord(videoRootName + ".mp4", usesNonLimelightCamera, timeLimit);
     }
 
     /// Return the total amount of bytes queued for writing to the file.
@@ -1907,21 +1906,33 @@ class Capture {
     void serializeLogcat() {
         Sidekick.logI("Logcat has stopped recording.");
 
-        StringBuilder cmd = new StringBuilder();
-        cmd.append("logcat ");
-        cmd.append("-v usec ");
-        cmd.append("UsbRequestJNI:S UsbRequest:S art:W ThreadPool:W System:W ");
-        cmd.append("-f ").append(Sidekick.TEMP_LOGCAT_FILE).append(" ");
-        cmd.append("-d "); // Dump and exit
+        List<String> cmdList = new ArrayList<>();
+        cmdList.add("logcat");
+        cmdList.add("-v");
+        cmdList.add("usec");
+        cmdList.add("UsbRequestJNI:S");
+        cmdList.add("UsbRequest:S");
+        cmdList.add("art:W");
+        cmdList.add("ThreadPool:W");
+        cmdList.add("System:W");
+        cmdList.add("-f");
+        cmdList.add(Sidekick.TEMP_LOGCAT_FILE);
+        cmdList.add("-d"); // Dump and exit
 
-        if (lastLogcatTime != null) {
-            cmd.append("-t ").append(lastLogcatTime).append(" ");
+        // If this is the first op mode after booting, we capture all logcat since boot.
+        // If this a subsequent op mode, we capture since the last logcat.
+        if (sidekick.lastLogcatTime != null) {
+            cmdList.add("-t");
+            cmdList.add(sidekick.lastLogcatTime);
         }
-        lastLogcatTime = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
+
+        sidekick.lastLogcatTime = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
                 .format(new Date());
         try {
-            // Run the command, drain streams to avoid blocking, and wait for completion:
-            Process p = Runtime.getRuntime().exec(cmd.toString());
+            // Run the command, drain streams to avoid blocking, and wait for completion.
+            // Use array-based exec to properly handle arguments without shell parsing issues.
+            Process p = Runtime.getRuntime().exec(cmdList.toArray(new String[0]));
+
             try (InputStream is = p.getInputStream()) { while (is.read() != -1); }
             try (InputStream es = p.getErrorStream()) { while (es.read() != -1); }
             p.waitFor();
@@ -2008,16 +2019,6 @@ class Capture {
         }
     }
 
-    /// Return true if the fully specified class name is present.
-    boolean usesClass(@SuppressWarnings("SameParameterValue") String className) {
-        try {
-            Class.forName(className);
-            return true;
-        } catch (ClassNotFoundException ignored) {
-            return false;
-        }
-    }
-
     /// Verify that the robot controller's name complies with R705. We don't record the team
     /// name but rather process it here to avoid embedding Personally Identifiable Information
     /// in the capture when submitting bug reports. It's also used for the default filename, but
@@ -2040,7 +2041,7 @@ class Capture {
         manifest.isBlocksOpMode = opMode instanceof BlocksOpMode;
         manifest.isLinearOpMode = opMode instanceof LinearOpMode;
         manifest.isCompliantRobotName = isCompliantRobotName();
-        manifest.usesPedroPathing = usesClass("com.pedropathing.api.Path");
+        manifest.fieldCoordinateSpace = sidekick.fieldCoordinateSpace.ordinal();
 
         Class<? extends OpMode> klass = opMode.getClass();
         manifest.opModeClass = rootName(klass.getName());
@@ -2255,10 +2256,10 @@ class Capture {
 
     /// Add the contents of an FTC Dashboard canvas to the capture.
     void captureDashboardCanvas(Object dashboardCanvas) {
-        recordCanvas(new Graphics(dashboardCanvas), CanvasFlags.ROTATED_FIELD);
+        recordGraphics(new Graphics(dashboardCanvas));
     }
     void captureInferredDashboardCanvas(Object dashboardCanvas) {
-        recordCanvas(new Graphics(dashboardCanvas), CanvasFlags.ROTATED_FIELD | CanvasFlags.INFERRED);
+        recordGraphics(new Graphics(dashboardCanvas), CanvasFlags.INFERRED);
     }
 
     /// Add data from a gamepad input packet to the capture.
@@ -2274,7 +2275,7 @@ class Capture {
             ByteBuffer inBuffer = ByteBuffer.wrap(input, headerOffset, input.length - headerOffset);
             byte version = inBuffer.get();
             if (version < 3) {
-                minorError("Gamepad");
+                minorError("Bad encoded Gamepad version");
                 return; // ====>
             }
 
@@ -2300,7 +2301,7 @@ class Capture {
             byte legacyType = inBuffer.get(); // LegacyType
 
             if ((gamepadUser < 1) || (gamepadUser > 2)) {
-                minorError("Gamepad");
+                minorError("Bad encoded Gamepad user");
                 return; // ====>
             }
 
@@ -2333,10 +2334,10 @@ class Capture {
     }
 
     /// Add the contents of a [Graphics] object to the capture.
-    void recordCanvas(Graphics graphics) { recordCanvas(graphics, 0); }
-    void recordCanvas(Graphics graphics, int flags) {
+    void recordGraphics(Graphics graphics) { recordGraphics(graphics, 0); }
+    void recordGraphics(Graphics graphics, int flags) {
         synchronized (sidekickLock) {
-            if (beginRecord(RecordId.CANVAS, 3)) {
+            if (beginRecord(RecordId.GRAPHICS, 3)) {
                 ByteBuffer buffer = graphics.buffer;
                 int size = buffer.position();
 
@@ -2348,7 +2349,7 @@ class Capture {
         }
     }
 
-    /// API to record the robot's current pose.
+    /// API to record the robot's current pose on the field.
     void recordRobotPose(Pose2D pose) {
         synchronized (sidekickLock) {
             if (beginRecord(RecordId.ROBOT_POSE, 12)) {
@@ -2361,10 +2362,10 @@ class Capture {
         }
     }
 
-    /// API to record the robot's current pose on the robot.
-    void recordCameraPose(Pose3D pose) {
+    /// API to record the robot's current pose on the robot and the field of view.
+    void recordCameraInformation(Pose3D pose, double horizontalFieldOfViewDegrees) {
         synchronized (sidekickLock) {
-            if (beginRecord(RecordId.CAMERA_POSE, 25)) {
+            if (beginRecord(RecordId.CAMERA_INFORMATION, 29)) {
                 chunk.put((byte) 0); // Reserved camera identifier
                 chunk.putFloat((float) DistanceUnit.INCH.fromUnit(pose.getPosition().unit, pose.getPosition().x));
                 chunk.putFloat((float) DistanceUnit.INCH.fromUnit(pose.getPosition().unit, pose.getPosition().y));
@@ -2372,6 +2373,7 @@ class Capture {
                 chunk.putFloat((float) pose.getOrientation().getYaw(AngleUnit.RADIANS));
                 chunk.putFloat((float) pose.getOrientation().getPitch(AngleUnit.RADIANS));
                 chunk.putFloat((float) pose.getOrientation().getRoll(AngleUnit.RADIANS));
+                chunk.putFloat((float) horizontalFieldOfViewDegrees);
             }
         }
     }
@@ -3225,11 +3227,13 @@ class Capture {
 
                 // If this is a webcam or built-in camera, remember to inform screen recording:
                 if (originalObject instanceof CameraName) {
-                    usingCamera = true;
+                    manifest.usesCamera = true;
+                    usesNonLimelightCamera = true;
                 }
 
                 // Do some extra processing for the first Limelight instance we see.
                 if ((originalObject instanceof Limelight3A) && (instanceId == 0)) {
+                    manifest.usesCamera = true;
                     // Stash the IP address for video capture at Start:
                     InetAddress inetAddress = Sidekick.getInstanceField(
                             originalObject, "inetAddress", InetAddress.class);

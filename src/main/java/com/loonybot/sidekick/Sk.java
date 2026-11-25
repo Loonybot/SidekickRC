@@ -78,6 +78,18 @@ public class Sk {
         }
     }
 
+    /**
+     * Set the default coordinate space to use for the field. This can be overridden in the Sidekick
+     * application field settings. Choose between Pedro Pathing, FTC official or FTC rotated spaces.
+     *
+     * @param space The coordinate space to use.
+     */
+    public static void setFieldCoordinateSpace(FieldCoordinateSpace space) {
+        if (Sidekick.isEnabled) {
+            Sidekick.instance.setFieldCoordinateSpace(space);
+        }
+    }
+
     ////////////////////////////////////////////////////////////////////////////////////////////////
     /// The following can be called from @OnCreate or an opMode.
 
@@ -237,9 +249,9 @@ public class Sk {
      * coordinate values range from -72 to 72 inches. For the Pedro Pathing coordinate space,
      * the origin is in the bottom-left and coordinate values range from 0 to 144 inches.<br>
      * <br>
-     * The {@link Graphics#translate}, {@link Graphics#rotate} and {@link Graphics#scale} APIs can be
+     * The {@link Graphics#setTranslation}, {@link Graphics#setRotation} and {@link Graphics#setScale} APIs can be
      * used to modify the coordinate space but the transforms are not cumulative;
-     * a second call to {@link Graphics#scale} will replace the first call rather than appending,
+     * a second call to {@link Graphics#setScale} will replace the first call rather than appending,
      * for example.
      *
      * @return The resulting Graphics object.
@@ -303,7 +315,7 @@ public class Sk {
     }
 
     /**
-     * Register the robot's current pose so that it can be tracked by Sidekick.
+     * Register the robot's current pose on the field so that it can be tracked by Sidekick.
      *
      * @param pose The current pose of the robot.
      */
@@ -314,13 +326,25 @@ public class Sk {
     }
 
     /**
-     * Register the camera's position and orientation on the robot for field visualizations.
-     * Can be called regularly to update the camera's position if mounted on a turret. Sidekick
-     * doesn't really need the camera's height, and roll is assumed to be zero.
+     * For field visualizations, register the camera's position and orientation and optional
+     * field of view. Can be called regularly to update the camera's position if mounted on a
+     * turret. Sidekick doesn't really need the camera's height, and roll is assumed to be zero.
+     * Positive x is straight forward on the robot, positive y is to the robot's left. Call it
+     * like this:
+     * <code>
+     *         Sk.setCameraInformation(new Pose3D(
+     *                 new Position(DistanceUnit.INCH, x, y, 0, 0),
+     *                 new YawPitchRollAngles(AngleUnit.DEGREES, heading, tilt, 0, 0)),
+     *                 0);
+     * </code>
+     *
+     * @param pose Camera's position and orientation on the robot.
+     * @param horizontalFieldOfViewDegrees Horizontal field of view of the camera, in degrees.
+     *                                     Specify zero if you don't know.
      */
-    public static void setCameraPose(@NonNull Pose3D pose) {
+    public static void setCameraInformation(@NonNull Pose3D pose, double horizontalFieldOfViewDegrees) {
         if (Capture.instance != null) {
-            Capture.instance.recordCameraPose(pose);
+            Capture.instance.recordCameraInformation(pose, horizontalFieldOfViewDegrees);
         }
     }
 
